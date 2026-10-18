@@ -1,18 +1,15 @@
 # admin.py
 
 import os
-import shutil
 import sqlite3
 import logging
-
-from datetime import time
+from datetime import datetime
 
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
 )
-
 from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
@@ -36,7 +33,6 @@ from database import (
     get_all_user_ids,
     record_backup,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -74,50 +70,37 @@ def admin_keyboard():
     ])
 
 
-async def admin_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if not user or not is_admin(user.id):
         return
 
     await update.effective_message.reply_text(
-        "⚙️ STORE BOT ADMIN PANEL\n\n"
-        "Select a feature below:",
+        "STORE BOT ADMIN PANEL\n\nSelect a feature:",
         reply_markup=admin_keyboard(),
     )
 
 
-async def admin_callbacks(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user = query.from_user
 
-    if not is_admin(user.id):
-        await query.answer(
-            "Access denied.",
-            show_alert=True,
-        )
+    if not is_admin(query.from_user.id):
+        await query.answer("Access denied.", show_alert=True)
         return
 
     await query.answer()
-
     action = query.data
 
     if action == "admin_stats":
         stats = get_statistics()
 
         await query.edit_message_text(
-            "📊 LIVE STATISTICS\n\n"
-            f"👥 Total Users: {stats['total_users']}\n"
-            f"🔗 Active Links: {stats['active_links']}\n"
-            f"📦 Total Content Items: {stats['total_items']}\n"
-            f"⌛ Expired Links Pending Deactivation: "
-            f"{stats['expired_pending_deactivation']}",
+            "LIVE STATISTICS\n\n"
+            f"Total Users: {stats['total_users']}\n"
+            f"Active Links: {stats['active_links']}\n"
+            f"Total Content Items: {stats['total_items']}\n"
+            f"Expired Links: {stats['expired_pending_deactivation']}",
             reply_markup=admin_keyboard(),
         )
 
@@ -125,8 +108,8 @@ async def admin_callbacks(
         context.user_data["admin_action"] = "broadcast"
 
         await query.edit_message_text(
-            "📢 BROADCAST\n\n"
-            "Send the message you want to broadcast to all registered users.\n\n"
+            "BROADCAST\n\n"
+            "Send the message you want to broadcast.\n"
             "Send /cancel to cancel."
         )
 
@@ -134,28 +117,27 @@ async def admin_callbacks(
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "💾 Create Backup",
+                    "Create Backup",
                     callback_data="admin_create_backup",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "♻️ Restore Backup",
+                    "Restore Backup",
                     callback_data="admin_restore",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "⬅️ Back",
+                    "Back",
                     callback_data="admin_home",
                 )
             ],
         ])
 
         await query.edit_message_text(
-            "💾 BACKUP MANAGEMENT\n\n"
-            "Create a database backup or upload a supported "
-            "backup file to restore the database.",
+            "BACKUP MANAGEMENT\n\n"
+            "Create or restore a database backup.",
             reply_markup=keyboard,
         )
 
@@ -166,34 +148,26 @@ async def admin_callbacks(
         context.user_data["admin_action"] = "restore"
 
         await query.edit_message_text(
-            "♻️ RESTORE DATABASE\n\n"
-            "Upload your SQLite database backup file (.db).\n\n"
-            "Warning: Restoring a backup replaces the current database.\n"
+            "RESTORE DATABASE\n\n"
+            "Upload a valid SQLite .db backup file.\n"
             "Send /cancel to cancel."
         )
 
     elif action == "admin_auto_backup":
-        status = (
-            "Enabled"
-            if AUTO_BACKUP_ENABLED
-            else "Disabled"
-        )
+        status = "Enabled" if AUTO_BACKUP_ENABLED else "Disabled"
 
         await query.edit_message_text(
-            "🔄 AUTOMATIC BACKUP\n\n"
+            "AUTO BACKUP\n\n"
             f"Status: {status}\n"
             f"Schedule: Daily at "
-            f"{AUTO_BACKUP_HOUR:02d}:"
-            f"{AUTO_BACKUP_MINUTE:02d}\n"
-            f"Timezone: {BOT_TIMEZONE}\n\n"
-            "The schedule is controlled through config.py.",
+            f"{AUTO_BACKUP_HOUR:02d}:{AUTO_BACKUP_MINUTE:02d}\n"
+            f"Timezone: {BOT_TIMEZONE}",
             reply_markup=admin_keyboard(),
         )
 
     elif action == "admin_home":
         await query.edit_message_text(
-            "⚙️ STORE BOT ADMIN PANEL\n\n"
-            "Select a feature below:",
+            "STORE BOT ADMIN PANEL\n\nSelect a feature:",
             reply_markup=admin_keyboard(),
         )
 
@@ -201,22 +175,9 @@ async def admin_callbacks(
 async def create_backup(context, backup_type="manual"):
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
-    filename = (
-        f"store_backup_{backup_type}_"
-        f"{context.job_queue.scheduler.timezone if context.job_queue else 'backup'}"
-    )
-
-    filename = (
-        filename.replace(":", "_")
-        .replace("/", "_")
-        .replace(" ", "_")
-        + ".db"
-    )
-
-    backup_path = os.path.join(
-        BACKUP_DIR,
-        filename,
-    )
+    timestamp = datetime.now(BOT_TIMEZONE).strftime("%Y%m%d_%H%M%S")
+    filename = f"store_backup_{backup_type}_{timestamp}.db"
+    backup_path = os.path.join(BACKUP_DIR, filename)
 
     source = sqlite3.connect(DATABASE_FILE)
     destination = sqlite3.connect(backup_path)
@@ -228,50 +189,37 @@ async def create_backup(context, backup_type="manual"):
         source.close()
 
     record_backup(filename, backup_type)
-
     return backup_path
 
 
 async def create_manual_backup(query, context):
     try:
-        backup_path = await create_backup(
-            context,
-            "manual",
-        )
+        backup_path = await create_backup(context, "manual")
 
         with open(backup_path, "rb") as backup_file:
             await context.bot.send_document(
                 chat_id=query.from_user.id,
                 document=backup_file,
                 filename=os.path.basename(backup_path),
-                caption="✅ Manual database backup created.",
+                caption="Database backup created successfully.",
             )
 
         await query.edit_message_text(
-            "✅ Backup created and sent to your Telegram chat.",
+            "Backup created and sent to your Telegram chat.",
             reply_markup=admin_keyboard(),
         )
 
     except Exception:
         logger.exception("Manual backup failed")
-
         await query.edit_message_text(
-            "❌ Backup failed. Check the bot logs."
+            "Backup failed. Please check the bot logs."
         )
 
 
-async def auto_backup_job(context):
+async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
     try:
-        backup_path = await create_backup(
-            context,
-            "automatic",
-        )
-
-        logger.info(
-            "Automatic backup created: %s",
-            backup_path,
-        )
-
+        path = await create_backup(context, "automatic")
+        logger.info("Automatic backup created: %s", path)
     except Exception:
         logger.exception("Automatic backup failed")
 
@@ -292,13 +240,10 @@ async def handle_admin_message(
         context.user_data.pop("admin_action", None)
 
         user_ids = get_all_user_ids()
-
         sent = 0
         failed = 0
 
-        status_message = await message.reply_text(
-            "📢 Broadcast started..."
-        )
+        status = await message.reply_text("Broadcast started...")
 
         for user_id in user_ids:
             try:
@@ -307,14 +252,12 @@ async def handle_admin_message(
                     from_chat_id=message.chat_id,
                     message_id=message.message_id,
                 )
-
                 sent += 1
-
             except Exception:
                 failed += 1
 
-        await status_message.edit_text(
-            "✅ BROADCAST COMPLETED\n\n"
+        await status.edit_text(
+            "BROADCAST COMPLETED\n\n"
             f"Successful: {sent}\n"
             f"Failed: {failed}"
         )
@@ -330,75 +273,14 @@ async def handle_admin_message(
 
         if not filename.lower().endswith(".db"):
             await message.reply_text(
-                "❌ Only .db backup files are accepted."
+                "Only .db backup files are accepted."
             )
             return
 
-        context.user_data.pop("admin_action", None)
-
-        temporary_path = os.path.join(
-            BACKUP_DIR,
-            "restore_temp.db",
+        await message.reply_text(
+            "Restore is not enabled in this version. "
+            "We will add a safe restore process after testing backups."
         )
-
-        try:
-            os.makedirs(BACKUP_DIR, exist_ok=True)
-
-            telegram_file = await context.bot.get_file(
-                message.document.file_id
-            )
-
-            await telegram_file.download_to_drive(
-                custom_path=temporary_path
-            )
-
-            check_conn = sqlite3.connect(temporary_path)
-
-            tables = {
-                row[0]
-                for row in check_conn.execute(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type='table'"
-                ).fetchall()
-            }
-
-            check_conn.close()
-
-            if not {"users", "content", "store_links", "settings"}.issubset(tables):
-                os.remove(temporary_path)
-
-                await message.reply_text(
-                    "❌ Invalid backup: required database tables are missing."
-                )
-                return
-
-            with sqlite3.connect(temporary_path) as test_conn:
-                test_conn.execute("PRAGMA integrity_check")
-
-            shutil.copy2(
-                temporary_path,
-                DATABASE_FILE + ".restore",
-            )
-
-            os.replace(
-                DATABASE_FILE + ".restore",
-                DATABASE_FILE,
-            )
-
-            os.remove(temporary_path)
-
-            await message.reply_text(
-                "✅ Database restored successfully.\n\n"
-                "Please restart the bot to ensure all components "
-                "reload the restored database."
-            )
-
-        except Exception:
-            logger.exception("Database restore failed")
-
-            await message.reply_text(
-                "❌ Restore failed. The database was not confirmed restored."
-            )
 
 
 async def cancel_admin_action(
@@ -407,9 +289,7 @@ async def cancel_admin_action(
 ):
     context.user_data.pop("admin_action", None)
 
-    await update.effective_message.reply_text(
-        "Action cancelled."
-    )
+    await update.effective_message.reply_text("Action cancelled.")
 
 
 def register_admin_handlers(application):
@@ -428,21 +308,21 @@ def register_admin_handlers(application):
         )
     )
 
+    # Group 1: allows bot.py's group-0 handler to run first.
     application.add_handler(
         MessageHandler(
             filters.ALL & ~filters.COMMAND,
             handle_admin_message,
         ),
-        group=0,
+        group=1,
     )
 
     if AUTO_BACKUP_ENABLED and application.job_queue:
         application.job_queue.run_daily(
             auto_backup_job,
-            time=time(
-                hour=AUTO_BACKUP_HOUR,
-                minute=AUTO_BACKUP_MINUTE,
-                tzinfo=BOT_TIMEZONE,
-            ),
+            time=datetime.strptime(
+                f"{AUTO_BACKUP_HOUR}:{AUTO_BACKUP_MINUTE}",
+                "%H:%M",
+            ).time().replace(tzinfo=BOT_TIMEZONE),
             name="daily_auto_backup",
         )
