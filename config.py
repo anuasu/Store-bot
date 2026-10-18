@@ -24,6 +24,7 @@ ADMIN_IDS = [
 # ==================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DATABASE_FILE = os.path.join(DATA_DIR, "store.db")
 
@@ -32,7 +33,23 @@ DATABASE_FILE = os.path.join(DATA_DIR, "store.db")
 # CONTENT EXPIRY CONFIGURATION
 # ==================================================
 
+# Default expiry for newly created Store Links.
+# Admin Panel can override this setting.
+
 CONTENT_TTL_MINUTES = 30
+
+# Available timer presets in Admin Panel.
+AVAILABLE_TIMER_MINUTES = [5, 10, 15, 30, 60]
+
+
+# ==================================================
+# CONTENT PROTECTION CONFIGURATION
+# ==================================================
+
+# Default protection for Telegram-supported content.
+# Admin Panel can turn protection ON or OFF.
+
+CONTENT_PROTECTION_ENABLED = True
 
 
 # ==================================================
@@ -69,6 +86,7 @@ FORCE_JOIN_CHANNELS = [
     },
 ]
 
+
 # ==================================================
 # AUTOMATIC BACKUP CONFIGURATION
 # ==================================================
@@ -76,6 +94,8 @@ FORCE_JOIN_CHANNELS = [
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 
 AUTO_BACKUP_ENABLED = True
+
+# Daily backup at midnight.
 AUTO_BACKUP_HOUR = 0
 AUTO_BACKUP_MINUTE = 0
 
@@ -100,20 +120,45 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 # CONFIGURATION VALIDATION
 # ==================================================
 
-if not BOT_TOKEN or BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-    raise ValueError("Please configure BOT_TOKEN in config.py")
+if not BOT_TOKEN or BOT_TOKEN in (
+    "PASTE_YOUR_BOT_TOKEN_HERE",
+    "hide",
+):
+    raise ValueError(
+        "Please configure your real BOT_TOKEN in config.py"
+    )
 
 if not ADMIN_IDS:
-    raise ValueError("Please configure at least one ADMIN_ID")
+    raise ValueError(
+        "Please configure at least one ADMIN_ID"
+    )
 
 if CONTENT_TTL_MINUTES < 1:
-    raise ValueError("CONTENT_TTL_MINUTES must be at least 1")
+    raise ValueError(
+        "CONTENT_TTL_MINUTES must be at least 1"
+    )
+
+if not AVAILABLE_TIMER_MINUTES:
+    raise ValueError(
+        "AVAILABLE_TIMER_MINUTES cannot be empty"
+    )
+
+if any(minutes < 1 for minutes in AVAILABLE_TIMER_MINUTES):
+    raise ValueError(
+        "All timer values must be at least 1 minute"
+    )
 
 if len(FORCE_JOIN_CHANNELS) > 6:
-    raise ValueError("Maximum 6 channels/groups are supported")
+    raise ValueError(
+        "Maximum 6 channels/groups are supported"
+    )
 
 for channel in FORCE_JOIN_CHANNELS:
-    if not all(key in channel for key in ("chat_id", "title", "url")):
+    if not all(
+        key in channel
+        for key in ("chat_id", "title", "url")
+    ):
         raise ValueError(
-            "Each force-join channel must contain chat_id, title and url"
+            "Each force-join channel must contain "
+            "chat_id, title and url"
         )
