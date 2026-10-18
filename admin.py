@@ -11,6 +11,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
+from telegram.error import TelegramError
 from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
@@ -48,6 +49,19 @@ logger = logging.getLogger(__name__)
 # ADMIN HELPERS
 # ==================================================
 
+CONTENT_TYPES = {
+    "link": "🔗 Link",
+    "video": "🎥 Video",
+    "photo": "🖼️ Photo",
+    "file": "📁 File",
+    "audio": "🎵 Audio",
+    "voice": "🎙️ Voice",
+    "gif": "🎞️ GIF",
+    "text": "📝 Text",
+    "bulk": "📦 Bulk Upload",
+}
+
+
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
@@ -66,11 +80,9 @@ def admin_keyboard():
         ],
         [
             InlineKeyboardButton(
-                "💾 Manual Backup / Restore",
+                "💾 Backup / Restore",
                 callback_data="admin_backup",
             ),
-        ],
-        [
             InlineKeyboardButton(
                 "🔄 Auto Backup",
                 callback_data="admin_auto_backup",
@@ -78,8 +90,8 @@ def admin_keyboard():
         ],
         [
             InlineKeyboardButton(
-                "➕ Add Link",
-                callback_data="admin_add_link",
+                "➕ Add",
+                callback_data="admin_add",
             ),
             InlineKeyboardButton(
                 "➖ Remove Link",
@@ -99,9 +111,67 @@ def admin_keyboard():
     ])
 
 
+def add_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔗 Link",
+                callback_data="add_type_link",
+            ),
+            InlineKeyboardButton(
+                "🎥 Video",
+                callback_data="add_type_video",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🖼️ Photo",
+                callback_data="add_type_photo",
+            ),
+            InlineKeyboardButton(
+                "📁 File",
+                callback_data="add_type_file",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🎵 Audio",
+                callback_data="add_type_audio",
+            ),
+            InlineKeyboardButton(
+                "🎙️ Voice",
+                callback_data="add_type_voice",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🎞️ GIF",
+                callback_data="add_type_gif",
+            ),
+            InlineKeyboardButton(
+                "📝 Text",
+                callback_data="add_type_text",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📦 Bulk Upload",
+                callback_data="add_type_bulk",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ Back",
+                callback_data="admin_home",
+            ),
+        ],
+    ])
+
+
 async def show_admin_home(query):
     await query.edit_message_text(
-        "STORE BOT ADMIN PANEL\n\nSelect a feature:",
+        "🛠️ STORE BOT ADMIN PANEL\n\n"
+        "Select an option:",
         reply_markup=admin_keyboard(),
     )
 
@@ -110,10 +180,7 @@ async def show_admin_home(query):
 # ADMIN COMMAND
 # ==================================================
 
-async def admin_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def admin_command(update, context):
     user = update.effective_user
 
     if not user or not is_admin(user.id):
@@ -122,7 +189,8 @@ async def admin_command(
     context.user_data.pop("admin_action", None)
 
     await update.effective_message.reply_text(
-        "STORE BOT ADMIN PANEL\n\nSelect a feature:",
+        "🛠️ STORE BOT ADMIN PANEL\n\n"
+        "Select an option:",
         reply_markup=admin_keyboard(),
     )
 
@@ -131,10 +199,7 @@ async def admin_command(
 # CALLBACK HANDLER
 # ==================================================
 
-async def admin_callbacks(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def admin_callbacks(update, context):
     query = update.callback_query
 
     if not query:
@@ -151,18 +216,83 @@ async def admin_callbacks(
     action = query.data or ""
 
     # --------------------------------------------------
-    # HOME
+    # ADMIN HOME
     # --------------------------------------------------
 
     if action == "admin_home":
         context.user_data.pop("admin_action", None)
         await show_admin_home(query)
+        return
 
     # --------------------------------------------------
-    # LIVE STATISTICS
+    # ADD MENU
     # --------------------------------------------------
 
-    elif action == "admin_stats":
+    if action == "admin_add":
+        context.user_data.pop("admin_action", None)
+
+        await query.edit_message_text(
+            "➕ ADD CONTENT\n\n"
+            "Select what you want to add.\n"
+            "Every item will receive its own Store Link.",
+            reply_markup=add_keyboard(),
+        )
+        return
+
+    # --------------------------------------------------
+    # SELECT CONTENT TYPE
+    # --------------------------------------------------
+
+    if action.startswith("add_type_"):
+        content_type = action.replace("add_type_", "", 1)
+
+        if content_type not in CONTENT_TYPES:
+            await query.edit_message_text(
+                "Invalid content type.",
+                reply_markup=admin_keyboard(),
+            )
+            return
+
+        context.user_data["admin_action"] = (
+            f"add_{content_type}"
+        )
+
+        instructions = {
+            "link": (
+                "Send one or more HTTP/HTTPS URLs, "
+                "one URL per line."
+            ),
+            "video": "Send the video or videos.",
+            "photo": "Send the photo or photos.",
+            "file": "Send the document or files.",
+            "audio": "Send the audio files.",
+            "voice": "Send the voice message or messages.",
+            "gif": "Send the GIF or animations.",
+            "text": (
+                "Send the text you want to store. "
+                "It will be delivered through its Store Link."
+            ),
+            "bulk": (
+                "Send your content items one by one or "
+                "as Telegram media albums.\n\n"
+                "Supported: links, videos, photos, files, "
+                "audio, voice, GIF and text.\n\n"
+                "Each supported item will get its own Store Link."
+            ),
+        }
+
+        await query.edit_message_text(
+            f"{CONTENT_TYPES[content_type].upper()}\n\n"
+            f"{instructions[content_type]}\n\n"
+            "Send /cancel to cancel.",
+        )
+        return
+
+    # --------------------------------------------------
+    # STATISTICS
+    # --------------------------------------------------
+
+    if action == "admin_stats":
         stats = get_statistics()
 
         await query.edit_message_text(
@@ -170,7 +300,7 @@ async def admin_callbacks(
             f"Total Users: {stats['total_users']}\n"
             f"Active Links: {stats['active_links']}\n"
             f"Total Content Items: {stats['total_items']}\n"
-            f"Expired Links: "
+            f"Expired Pending: "
             f"{stats['expired_pending_deactivation']}",
             reply_markup=InlineKeyboardMarkup([
                 [
@@ -187,81 +317,78 @@ async def admin_callbacks(
                 ],
             ]),
         )
+        return
 
     # --------------------------------------------------
     # BROADCAST
     # --------------------------------------------------
 
-    elif action == "admin_broadcast":
+    if action == "admin_broadcast":
         context.user_data["admin_action"] = "broadcast"
 
         await query.edit_message_text(
             "📢 BROADCAST\n\n"
-            "Send the message, photo, video or other content "
-            "you want to broadcast.\n\n"
+            "Send the message or media you want to "
+            "broadcast to bot users.\n\n"
             "Send /cancel to cancel."
         )
+        return
 
     # --------------------------------------------------
     # BACKUP MENU
     # --------------------------------------------------
 
-    elif action == "admin_backup":
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "📥 Create Backup",
-                    callback_data="admin_create_backup",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📤 Restore Backup",
-                    callback_data="admin_restore",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅️ Back",
-                    callback_data="admin_home",
-                )
-            ],
-        ])
-
+    if action == "admin_backup":
         await query.edit_message_text(
             "💾 BACKUP MANAGEMENT\n\n"
-            "Create a database backup or select a backup "
-            "file to restore.\n\n"
-            "⚠️ Restore replaces the current database. "
-            "Only use a trusted backup.",
-            reply_markup=keyboard,
+            "Choose an option:",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "📥 Create Backup",
+                        callback_data="admin_create_backup",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "📤 Restore Backup",
+                        callback_data="admin_restore",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back",
+                        callback_data="admin_home",
+                    )
+                ],
+            ]),
         )
+        return
 
-    elif action == "admin_create_backup":
+    if action == "admin_create_backup":
         await create_manual_backup(query, context)
+        return
 
-    elif action == "admin_restore":
+    if action == "admin_restore":
         context.user_data["admin_action"] = "restore"
 
         await query.edit_message_text(
-            "📤 RESTORE DATABASE\n\n"
+            "📤 RESTORE BACKUP\n\n"
             "Upload a trusted SQLite .db backup file.\n"
-            "Before restoring, make sure you have a backup "
-            "of the current database.\n\n"
+            "The current database must be backed up first.\n\n"
             "Send /cancel to cancel."
         )
+        return
 
     # --------------------------------------------------
-    # AUTOMATIC BACKUP
+    # AUTO BACKUP
     # --------------------------------------------------
 
-    elif action == "admin_auto_backup":
-        status = (
-            "Enabled" if AUTO_BACKUP_ENABLED else "Disabled"
-        )
+    if action == "admin_auto_backup":
+        status = "Enabled" if AUTO_BACKUP_ENABLED else "Disabled"
 
         await query.edit_message_text(
-            "🔄 AUTOMATIC BACKUP\n\n"
+            "🔄 AUTO BACKUP\n\n"
             f"Status: {status}\n"
             f"Schedule: Daily at "
             f"{AUTO_BACKUP_HOUR:02d}:"
@@ -276,30 +403,13 @@ async def admin_callbacks(
                 ],
             ]),
         )
-
-    # --------------------------------------------------
-    # ADD LINK
-    # --------------------------------------------------
-
-    elif action == "admin_add_link":
-        context.user_data["admin_action"] = "add_link"
-
-        await query.edit_message_text(
-            "➕ ADD LINK\n\n"
-            "Send one or more URLs, one URL per line.\n\n"
-            "Example:\n"
-            "https://example.com/first\n"
-            "https://example.com/second\n\n"
-            "Each valid URL will receive its own Store Link.\n"
-            "Normal text will NOT create a Store Link.\n\n"
-            "Send /cancel to cancel."
-        )
+        return
 
     # --------------------------------------------------
     # REMOVE LINK
     # --------------------------------------------------
 
-    elif action == "admin_remove_link":
+    if action == "admin_remove_link":
         links = get_removable_links()
 
         if not links:
@@ -338,27 +448,21 @@ async def admin_callbacks(
 
         await query.edit_message_text(
             "➖ REMOVE LINK\n\n"
-            "Select a Store Link to deactivate it.\n"
-            "Only active links are shown here.",
+            "Select a Store Link to deactivate it.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        return
 
-    elif action.startswith("admin_del_"):
+    if action.startswith("admin_del_"):
         link_code = action[len("admin_del_"):]
-
-        if not link_code:
-            await query.edit_message_text(
-                "Invalid link code.",
-                reply_markup=admin_keyboard(),
-            )
-            return
 
         success = deactivate_link(link_code)
 
-        if success:
-            result = "Store Link deactivated successfully."
-        else:
-            result = "Link not found or already inactive."
+        result = (
+            "Store Link deactivated successfully."
+            if success
+            else "Link not found or already inactive."
+        )
 
         await query.edit_message_text(
             f"➖ REMOVE LINK\n\n{result}",
@@ -377,27 +481,27 @@ async def admin_callbacks(
                 ],
             ]),
         )
+        return
 
     # --------------------------------------------------
     # TIMER SETTINGS
     # --------------------------------------------------
 
-    elif action == "admin_timer":
-        current_timer = get_content_ttl_minutes()
+    if action == "admin_timer":
+        current = get_content_ttl_minutes()
 
         keyboard = []
-
         row = []
 
         for minutes in AVAILABLE_TIMER_MINUTES:
+            label = (
+                f"{minutes} min"
+                + (" ✓" if minutes == current else "")
+            )
+
             row.append(
                 InlineKeyboardButton(
-                    f"{minutes} min"
-                    + (
-                        " ✓"
-                        if minutes == current_timer
-                        else ""
-                    ),
+                    label,
                     callback_data=f"admin_timer_set_{minutes}",
                 )
             )
@@ -409,34 +513,34 @@ async def admin_callbacks(
         if row:
             keyboard.append(row)
 
-        keyboard.append([
-            InlineKeyboardButton(
-                "✏️ Custom Timer",
-                callback_data="admin_timer_custom",
-            )
-        ])
-
-        keyboard.append([
-            InlineKeyboardButton(
-                "⬅️ Back",
-                callback_data="admin_home",
-            )
+        keyboard.extend([
+            [
+                InlineKeyboardButton(
+                    "✏️ Custom Timer",
+                    callback_data="admin_timer_custom",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Back",
+                    callback_data="admin_home",
+                )
+            ],
         ])
 
         await query.edit_message_text(
             "⏱️ TIMER SETTINGS\n\n"
-            f"Current timer: {current_timer} minutes\n\n"
-            "Choose the expiry timer for newly created "
-            "Store Links.\n"
-            "Existing links keep their original expiry.",
+            f"Current timer: {current} minutes\n\n"
+            "This timer applies to newly created Store Links.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        return
 
-    elif action.startswith("admin_timer_set_"):
-        raw_minutes = action[len("admin_timer_set_"):]
-
+    if action.startswith("admin_timer_set_"):
         try:
-            minutes = int(raw_minutes)
+            minutes = int(
+                action[len("admin_timer_set_"):]
+            )
         except ValueError:
             await query.edit_message_text(
                 "Invalid timer value.",
@@ -446,7 +550,7 @@ async def admin_callbacks(
 
         if minutes not in AVAILABLE_TIMER_MINUTES:
             await query.edit_message_text(
-                "This timer option is not allowed.",
+                "Invalid timer option.",
                 reply_markup=admin_keyboard(),
             )
             return
@@ -455,9 +559,7 @@ async def admin_callbacks(
 
         await query.edit_message_text(
             "✅ TIMER UPDATED\n\n"
-            f"New Store Links will expire after "
-            f"{minutes} minutes.\n"
-            "Existing links keep their original expiry.",
+            f"New Store Links expire after {minutes} minutes.",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -473,121 +575,109 @@ async def admin_callbacks(
                 ],
             ]),
         )
+        return
 
-    elif action == "admin_timer_custom":
+    if action == "admin_timer_custom":
         context.user_data["admin_action"] = "custom_timer"
 
         await query.edit_message_text(
             "✏️ CUSTOM TIMER\n\n"
-            "Send the timer in minutes as a whole number.\n"
-            "Allowed range: 1–10080 minutes (7 days).\n\n"
+            "Send the expiry time in minutes.\n"
+            "Allowed range: 1–10080 minutes.\n\n"
             "Send /cancel to cancel."
         )
+        return
 
     # --------------------------------------------------
     # CONTENT PROTECTION
     # --------------------------------------------------
 
-    elif action == "admin_protection":
+    if action == "admin_protection":
         enabled = get_content_protection()
-
-        status = "ON 🟢" if enabled else "OFF 🔴"
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🟢 Turn ON",
-                    callback_data="admin_protection_on",
-                ),
-                InlineKeyboardButton(
-                    "🔴 Turn OFF",
-                    callback_data="admin_protection_off",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅️ Back",
-                    callback_data="admin_home",
-                )
-            ],
-        ])
 
         await query.edit_message_text(
             "🛡️ CONTENT PROTECTION\n\n"
-            f"Current status: {status}\n\n"
-            "When enabled, supported Telegram messages "
-            "are sent with content protection.\n"
-            "This discourages forwarding and saving, but "
-            "cannot prevent every possible copy.\n\n"
-            "This setting applies to newly delivered content.",
-            reply_markup=keyboard,
-        )
-
-    elif action == "admin_protection_on":
-        set_content_protection(True)
-
-        await query.edit_message_text(
-            "🛡️ CONTENT PROTECTION ENABLED ✅\n\n"
-            "Newly delivered supported content will use "
-            "Telegram content protection.",
+            f"Current status: {'ON 🟢' if enabled else 'OFF 🔴'}\n\n"
+            "This setting discourages forwarding and saving "
+            "where supported by Telegram.",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "⬅️ Protection Settings",
-                        callback_data="admin_protection",
-                    )
+                        "🟢 Turn ON",
+                        callback_data="admin_protection_on",
+                    ),
+                    InlineKeyboardButton(
+                        "🔴 Turn OFF",
+                        callback_data="admin_protection_off",
+                    ),
                 ],
                 [
                     InlineKeyboardButton(
-                        "⬅️ Admin Panel",
+                        "⬅️ Back",
                         callback_data="admin_home",
                     )
                 ],
             ]),
         )
+        return
 
-    elif action == "admin_protection_off":
-        set_content_protection(False)
+    if action == "admin_protection_on":
+        set_content_protection(True)
 
         await query.edit_message_text(
-            "🛡️ CONTENT PROTECTION DISABLED\n\n"
-            "Newly delivered content will no longer "
-            "request Telegram content protection.",
+            "🛡️ Content Protection enabled.",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "⬅️ Protection Settings",
+                        "⬅️ Back",
                         callback_data="admin_protection",
                     )
-                ],
+                ]
+            ]),
+        )
+        return
+
+    if action == "admin_protection_off":
+        set_content_protection(False)
+
+        await query.edit_message_text(
+            "🛡️ Content Protection disabled.",
+            reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "⬅️ Admin Panel",
-                        callback_data="admin_home",
+                        "⬅️ Back",
+                        callback_data="admin_protection",
                     )
-                ],
+                ]
             ]),
         )
 
 
 # ==================================================
-# LINK HELPERS
+# REMOVE LINK HELPERS
 # ==================================================
 
 def get_removable_links(limit=30):
     with sqlite3.connect(DATABASE_FILE, timeout=30) as conn:
         conn.row_factory = sqlite3.Row
 
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             SELECT link_code
             FROM store_links
             WHERE is_active = 1
             ORDER BY created_at DESC
             LIMIT ?
-        """, (int(limit),)).fetchall()
+            """,
+            (limit,),
+        ).fetchall()
 
         return [dict(row) for row in rows]
 
+
+# ==================================================
+# URL VALIDATION
+# ==================================================
 
 def is_valid_http_url(value):
     if not value:
@@ -595,30 +685,32 @@ def is_valid_http_url(value):
 
     value = value.strip()
 
-    if len(value) > 2048:
-        return False
-
-    # Avoid whitespace and malformed URLs.
     if re.search(r"\s", value):
         return False
 
-    return bool(
-        re.match(
-            r"^https?://"
-            r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}"
-            r"(?::\d{1,5})?"
-            r"(?:[/?#][^\s]*)?$",
-            value,
-            re.IGNORECASE,
-        )
-    )
+    match = re.match(r"^https?://", value, re.IGNORECASE)
 
+    if not match:
+        return False
+
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(value)
+
+        return bool(
+            parsed.hostname
+            and "." in parsed.hostname
+        )
+    except ValueError:
+        return False
+
+
+# ==================================================
+# CREATE STORE LINKS
+# ==================================================
 
 async def create_url_store_links(urls, context):
-    """
-    Create one Store Link per URL using bot.py's
-    existing Store Link creation functions.
-    """
     import bot
 
     created = []
@@ -626,34 +718,46 @@ async def create_url_store_links(urls, context):
 
     for url in urls:
         try:
-            result = bot.create_store_link(
+            code = bot.create_store_link(
                 content_type="url",
                 content_url=url,
             )
 
-            if result:
-                created.append((url, result))
+            if code:
+                created.append((url, code))
             else:
                 failed.append(url)
 
         except Exception:
             logger.exception(
-                "Could not create Store Link for URL: %s",
-                url,
+                "Failed to create URL Store Link."
             )
             failed.append(url)
 
     return created, failed
 
 
+async def create_content_store_link(
+    content_type,
+    file_id=None,
+    text_content=None,
+    content_url=None,
+):
+    import bot
+
+    return bot.create_store_link(
+        content_type=content_type,
+        file_id=file_id,
+        text_content=text_content,
+        content_url=content_url,
+    )
+
+
 # ==================================================
-# BACKUP CREATION
+# BACKUP
 # ==================================================
 
-async def create_backup(
-    context,
-    backup_type="manual",
-):
+async def create_backup(context, backup_type="manual"):
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
     timestamp = datetime.now(
@@ -664,20 +768,14 @@ async def create_backup(
         f"store_backup_{backup_type}_{timestamp}.db"
     )
 
-    backup_path = os.path.join(
-        BACKUP_DIR,
-        filename,
-    )
+    path = os.path.join(BACKUP_DIR, filename)
 
     source = sqlite3.connect(
         DATABASE_FILE,
         timeout=30,
     )
 
-    destination = sqlite3.connect(
-        backup_path,
-        timeout=30,
-    )
+    destination = sqlite3.connect(path, timeout=30)
 
     try:
         source.backup(destination)
@@ -687,24 +785,19 @@ async def create_backup(
 
     record_backup(filename, backup_type)
 
-    return backup_path
+    return path
 
 
 async def create_manual_backup(query, context):
     try:
-        backup_path = await create_backup(
-            context,
-            "manual",
-        )
+        path = await create_backup(context, "manual")
 
-        with open(backup_path, "rb") as backup_file:
+        with open(path, "rb") as file:
             await context.bot.send_document(
                 chat_id=query.from_user.id,
-                document=backup_file,
-                filename=os.path.basename(backup_path),
-                caption=(
-                    "Database backup created successfully."
-                ),
+                document=file,
+                filename=os.path.basename(path),
+                caption="✅ Database backup created.",
             )
 
         await query.edit_message_text(
@@ -713,48 +806,68 @@ async def create_manual_backup(query, context):
         )
 
     except Exception:
-        logger.exception("Manual backup failed")
+        logger.exception("Backup failed.")
 
         await query.edit_message_text(
-            "❌ Backup failed. Please check the bot logs.",
+            "❌ Backup failed. Check the bot logs.",
             reply_markup=admin_keyboard(),
         )
 
 
-async def auto_backup_job(
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def auto_backup_job(context):
     try:
         path = await create_backup(
             context,
             "automatic",
         )
 
-        logger.info(
-            "Automatic backup created: %s",
-            path,
-        )
+        logger.info("Automatic backup created: %s", path)
 
     except Exception:
-        logger.exception("Automatic backup failed")
+        logger.exception("Automatic backup failed.")
+
+
+# ==================================================
+# CONTENT TYPE DETECTION
+# ==================================================
+
+def detect_content(message):
+    if message.photo:
+        return "photo", message.photo[-1].file_id
+
+    if message.video:
+        return "video", message.video.file_id
+
+    if message.document:
+        return "file", message.document.file_id
+
+    if message.audio:
+        return "audio", message.audio.file_id
+
+    if message.voice:
+        return "voice", message.voice.file_id
+
+    if message.animation:
+        return "gif", message.animation.file_id
+
+    if message.video_note:
+        return "video", message.video_note.file_id
+
+    if message.sticker:
+        return "file", message.sticker.file_id
+
+    return None, None
 
 
 # ==================================================
 # ADMIN MESSAGE HANDLER
 # ==================================================
 
-async def handle_admin_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def handle_admin_message(update, context):
     user = update.effective_user
     message = update.effective_message
 
-    if (
-        not user
-        or not message
-        or not is_admin(user.id)
-    ):
+    if not user or not message or not is_admin(user.id):
         return
 
     action = context.user_data.get("admin_action")
@@ -769,16 +882,14 @@ async def handle_admin_message(
     if action == "broadcast":
         context.user_data.pop("admin_action", None)
 
-        user_ids = get_all_user_ids()
-
-        sent = 0
-        failed = 0
-
         status = await message.reply_text(
             "📢 Broadcast started..."
         )
 
-        for user_id in user_ids:
+        sent = 0
+        failed = 0
+
+        for user_id in get_all_user_ids():
             try:
                 await context.bot.copy_message(
                     chat_id=user_id,
@@ -786,8 +897,7 @@ async def handle_admin_message(
                     message_id=message.message_id,
                 )
                 sent += 1
-
-            except Exception:
+            except TelegramError:
                 failed += 1
 
         await status.edit_text(
@@ -795,93 +905,16 @@ async def handle_admin_message(
             f"Successful: {sent}\n"
             f"Failed: {failed}"
         )
-
-    # --------------------------------------------------
-    # ADD URL LINKS
-    # --------------------------------------------------
-
-    elif action == "add_link":
-        if not message.text:
-            await message.reply_text(
-                "Please send URLs as text, one URL per line."
-            )
-            return
-
-        urls = [
-            line.strip()
-            for line in message.text.splitlines()
-            if line.strip()
-        ]
-
-        if not urls:
-            await message.reply_text(
-                "No URLs found. Send one URL per line."
-            )
-            return
-
-        invalid_urls = [
-            url for url in urls
-            if not is_valid_http_url(url)
-        ]
-
-        if invalid_urls:
-            await message.reply_text(
-                "❌ Invalid URL(s) detected.\n\n"
-                "Please send only valid http:// or https:// "
-                "URLs, one per line.\n"
-                "No links were created. Try again or use /cancel."
-            )
-            return
-
-        context.user_data.pop("admin_action", None)
-
-        status = await message.reply_text(
-            "⏳ Creating Store Links..."
-        )
-
-        created, failed = await create_url_store_links(
-            urls,
-            context,
-        )
-
-        lines = [
-            "➕ ADD LINK RESULT",
-            "",
-            f"Successful: {len(created)}",
-            f"Failed: {len(failed)}",
-        ]
-
-        if created:
-            lines.extend(["", "Created URLs:"])
-
-            for url, result in created[:10]:
-                lines.append(f"• {url}")
-
-        if len(created) > 10:
-            lines.append(
-                f"...and {len(created) - 10} more."
-            )
-
-        await status.edit_text(
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Admin Panel",
-                        callback_data="admin_home",
-                    )
-                ]
-            ]),
-        )
+        return
 
     # --------------------------------------------------
     # CUSTOM TIMER
     # --------------------------------------------------
 
-    elif action == "custom_timer":
+    if action == "custom_timer":
         if not message.text:
             await message.reply_text(
-                "Send the timer as a whole number of minutes."
+                "Send a whole number of minutes."
             )
             return
 
@@ -889,7 +922,7 @@ async def handle_admin_message(
             minutes = int(message.text.strip())
         except ValueError:
             await message.reply_text(
-                "Please enter a whole number, e.g. 45."
+                "Invalid number. Example: 45"
             )
             return
 
@@ -900,65 +933,299 @@ async def handle_admin_message(
             return
 
         set_content_ttl_minutes(minutes)
-
         context.user_data.pop("admin_action", None)
 
         await message.reply_text(
-            "✅ TIMER UPDATED\n\n"
-            f"New Store Links will expire after "
-            f"{minutes} minutes.\n"
-            "Existing links keep their original expiry.",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⏱️ Timer Settings",
-                        callback_data="admin_timer",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Admin Panel",
-                        callback_data="admin_home",
-                    )
-                ],
-            ]),
+            f"✅ Timer updated to {minutes} minutes.",
+            reply_markup=admin_keyboard(),
         )
+        return
 
     # --------------------------------------------------
-    # RESTORE
+    # ADD CONTENT
     # --------------------------------------------------
 
-    elif action == "restore":
-        if not message.document:
-            await message.reply_text(
-                "Please upload a SQLite .db backup file."
+    if action.startswith("add_"):
+        content_type = action[4:]
+
+        # Bulk mode can accept multiple content types.
+        if content_type == "bulk":
+            if message.text:
+                urls = [
+                    line.strip()
+                    for line in message.text.splitlines()
+                    if line.strip()
+                ]
+
+                # URLs only become links in explicit Add mode.
+                if urls and all(
+                    is_valid_http_url(url)
+                    for url in urls
+                ):
+                    created, failed = await create_url_store_links(
+                        urls,
+                        context,
+                    )
+
+                    await send_link_results(
+                        message,
+                        context,
+                        created,
+                        failed,
+                    )
+                    return
+
+                # Ordinary text is stored only in bulk mode.
+                try:
+                    code = await create_content_store_link(
+                        "text",
+                        text_content=message.text,
+                    )
+
+                    context.user_data["last_created_codes"] = [code]
+
+                    await send_link_results(
+                        message,
+                        context,
+                        [("Text content", code)],
+                        [],
+                    )
+                except Exception:
+                    logger.exception("Bulk text creation failed.")
+
+                    await message.reply_text(
+                        "❌ Could not create the text Store Link."
+                    )
+
+                return
+
+            await create_media_item(
+                message,
+                context,
+                content_type=None,
             )
             return
 
-        filename = message.document.file_name or ""
+        # Link mode.
+        if content_type == "link":
+            if not message.text:
+                await message.reply_text(
+                    "Please send URLs, one per line."
+                )
+                return
 
-        if not filename.lower().endswith(".db"):
-            await message.reply_text(
-                "Only .db backup files are accepted."
+            urls = [
+                line.strip()
+                for line in message.text.splitlines()
+                if line.strip()
+            ]
+
+            if not urls or not all(
+                is_valid_http_url(url)
+                for url in urls
+            ):
+                await message.reply_text(
+                    "❌ Send only valid HTTP/HTTPS URLs, "
+                    "one URL per line. No links were created."
+                )
+                return
+
+            created, failed = await create_url_store_links(
+                urls,
+                context,
+            )
+
+            await send_link_results(
+                message,
+                context,
+                created,
+                failed,
             )
             return
 
+        # Text mode.
+        if content_type == "text":
+            if not message.text:
+                await message.reply_text(
+                    "Please send the text you want to store."
+                )
+                return
+
+            try:
+                code = await create_content_store_link(
+                    "text",
+                    text_content=message.text,
+                )
+
+                context.user_data["admin_action"] = "add_text"
+
+                await send_link_results(
+                    message,
+                    context,
+                    [("Text content", code)],
+                    [],
+                )
+
+            except Exception:
+                logger.exception("Text Store Link creation failed.")
+
+                await message.reply_text(
+                    "❌ Could not create the text Store Link."
+                )
+
+            return
+
+        # Media modes.
+        await create_media_item(
+            message,
+            context,
+            content_type=content_type,
+        )
+        return
+
+    # --------------------------------------------------
+    # RESTORE PLACEHOLDER
+    # --------------------------------------------------
+
+    if action == "restore":
         await message.reply_text(
             "⚠️ Restore is not enabled yet.\n\n"
             "The uploaded file has not been restored. "
-            "We will implement a safe restore process "
-            "after testing backups."
+            "A safe restore process still needs to be implemented."
         )
 
 
 # ==================================================
-# CANCEL ADMIN ACTION
+# MEDIA CREATION
 # ==================================================
 
-async def cancel_admin_action(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+async def create_media_item(
+    message,
+    context,
+    content_type=None,
 ):
+    detected_type, file_id = detect_content(message)
+
+    if not file_id:
+        await message.reply_text(
+            "Please send a supported media item."
+        )
+        return
+
+    if content_type == "video" and detected_type != "video":
+        await message.reply_text("Please send a video.")
+        return
+
+    if content_type == "photo" and detected_type != "photo":
+        await message.reply_text("Please send a photo.")
+        return
+
+    if content_type == "file" and not message.document:
+        await message.reply_text("Please send a document/file.")
+        return
+
+    if content_type == "audio" and detected_type != "audio":
+        await message.reply_text("Please send an audio file.")
+        return
+
+    if content_type == "voice" and detected_type != "voice":
+        await message.reply_text("Please send a voice message.")
+        return
+
+    if content_type == "gif" and detected_type != "gif":
+        await message.reply_text("Please send a GIF/animation.")
+        return
+
+    # Translate the Admin Panel type into bot.py's database type.
+    database_type = detected_type
+
+    if content_type == "file":
+        database_type = "document"
+
+    if content_type == "gif":
+        database_type = "animation"
+
+    if content_type == "bulk":
+        database_type = detected_type
+
+    try:
+        code = await create_content_store_link(
+            database_type,
+            file_id=file_id,
+        )
+
+        await send_link_results(
+            message,
+            context,
+            [(CONTENT_TYPES.get(content_type, "Media"), code)],
+            [],
+        )
+
+    except Exception:
+        logger.exception("Media Store Link creation failed.")
+
+        await message.reply_text(
+            "❌ Could not create the Store Link. "
+            "Please check the bot logs."
+        )
+
+
+# ==================================================
+# SEND STORE LINK RESULTS
+# ==================================================
+
+async def send_link_results(
+    message,
+    context,
+    created,
+    failed,
+):
+    bot_info = await context.bot.get_me()
+
+    lines = [
+        "✅ STORE LINK RESULT",
+        "",
+        f"Created: {len(created)}",
+        f"Failed: {len(failed)}",
+        "",
+    ]
+
+    for index, (label, code) in enumerate(created, start=1):
+        url = f"https://t.me/{bot_info.username}?start={code}"
+
+        lines.append(f"{index}. {label}")
+        lines.append(url)
+        lines.append("")
+
+    text = "\n".join(lines).strip()
+
+    # Keep messages within Telegram's size limit.
+    if len(text) <= 4000:
+        await message.reply_text(text)
+        return
+
+    current = ""
+
+    for line in lines:
+        candidate = current + "\n" + line if current else line
+
+        if len(candidate) > 3800:
+            if current:
+                await message.reply_text(current)
+
+            current = line
+        else:
+            current = candidate
+
+    if current:
+        await message.reply_text(current)
+
+
+# ==================================================
+# CANCEL
+# ==================================================
+
+async def cancel_admin_action(update, context):
     user = update.effective_user
 
     if not user or not is_admin(user.id):
@@ -978,29 +1245,22 @@ async def cancel_admin_action(
 
 def register_admin_handlers(application):
     application.add_handler(
-        CommandHandler(
-            "admin",
-            admin_command,
-        )
+        CommandHandler("admin", admin_command)
     )
 
     application.add_handler(
-        CommandHandler(
-            "cancel",
-            cancel_admin_action,
-        )
+        CommandHandler("cancel", cancel_admin_action)
     )
 
     application.add_handler(
         CallbackQueryHandler(
             admin_callbacks,
-            pattern=r"^admin_",
+            pattern=r"^(admin_|add_type_)",
         )
     )
 
-    # Admin message handler runs in group 1.
-    # Ensure bot.py's message handler does not
-    # create links from ordinary admin text.
+    # Admin messages are handled in group 1.
+    # bot.py's content handler must respect admin_action.
     application.add_handler(
         MessageHandler(
             filters.ALL & ~filters.COMMAND,
@@ -1015,8 +1275,6 @@ def register_admin_handlers(application):
             time=datetime.strptime(
                 f"{AUTO_BACKUP_HOUR}:{AUTO_BACKUP_MINUTE}",
                 "%H:%M",
-            ).time().replace(
-                tzinfo=BOT_TIMEZONE,
-            ),
+            ).time().replace(tzinfo=BOT_TIMEZONE),
             name="daily_auto_backup",
         )
