@@ -1,6 +1,10 @@
+# bot.py
+
+import asyncio
 import logging
 import re
 import secrets
+
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -10,7 +14,7 @@ from telegram import (
     InlineKeyboardMarkup,
 )
 from telegram.constants import ChatMemberStatus
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -44,7 +48,12 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = config.BOT_TOKEN
 ADMIN_IDS = set(config.ADMIN_IDS)
 FORCE_JOIN_CHANNELS = config.FORCE_JOIN_CHANNELS
-CONTENT_TTL_MINUTES = config.CONTENT_TTL_MINUTES
+
+# Telegram message limits.
+MAX_TELEGRAM_MESSAGE_LENGTH = 4000
+
+# Albums can contain multiple media items.
+ALBUM_WAIT_SECONDS = 1.5
 
 
 # ==========================================================
@@ -56,7 +65,9 @@ def utc_now():
 
 
 def utc_iso(value):
-    return value.astimezone(timezone.utc).isoformat()
+    return value.astimezone(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
 
 def parse_datetime(value):
@@ -76,8 +87,14 @@ def parse_datetime(value):
 
 
 def get_expiry_time():
+    """
+    Use the timer saved in the database.
+    Existing Store Links retain their original expiry.
+    """
+    minutes = database.get_content_ttl_minutes()
+
     return utc_iso(
-        utc_now() + timedelta(minutes=CONTENT_TTL_MINUTES)
+        utc_now() + timedelta(minutes=minutes)
     )
 
 
@@ -90,12 +107,7 @@ def is_admin(user_id):
 # ==========================================================
 
 def initialize_database():
-    """
-    Initialize tables before the bot starts.
-    """
-
     database.init_db()
-
     logger.info("Database initialized successfully.")
 
 
@@ -110,16 +122,42 @@ def create_store_link(
     content_url=None,
 ):
     """
-    Save one content item and generate one unique Store Link.
+    Create one content record and one unique Store Link.
     """
 
+    if content_type not in {
+        "text",
+        "url",
+        "photo",
+        "video",
+        "document",
+        "audio",
+        "animation",
+        "voice",
+        "video_note",
+        "sticker",
+    }:
+        raise ValueError(
+            f"Unsupported content type: {content_type}"
+        )
+
+    if content_type == "url":
+        if not content_url or not is_valid_url(content_url):
+            raise ValueError("Invalid URL.")
+
+    if content_type == "text" and not text_content:
+        raise ValueError("Text content cannot be empty.")
+
+    if content_type not in {"text", "url"} and not file_id:
+        raise ValueError("Media file_id is required.")
+
+    # Each item gets its own unique Store Link.
     link_code = secrets.token_urlsafe(12)
+
     created_at = utc_iso(utc_now())
     expires_at = get_expiry_time()
 
-    conn = database.get_connection()
-
-    try:
+    with database.get_connection() as conn:
         cursor = conn.cursor()
 
         cursor.execute(
@@ -166,16 +204,7 @@ def create_store_link(
             ),
         )
 
-        conn.commit()
-
-        return link_code
-
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
-        conn.close()
+    return link_code
 
 
 # ==========================================================
@@ -184,93 +213,150 @@ def create_store_link(
 
 def get_valid_item(link_code):
     """
-    Return content only when its link and content are active
-    and neither has expired.
+    Return content only if both its Store Link and content
+    are active and unexpired.
     """
 
     if not link_code:
         return None
 
-    conn = database.get_connection()
+    now = utc_now()
 
-    try:
-        cursor = conn.cursor()
-
-        cursor.execute(
+    with database.get_connection() as conn:
+        row = conn.execute(
             """
             SELECT
-                c.id,
+                c.id AS content_id,
                 c.content_type,
                 c.file_id,
                 c.text_content,
                 c.content_url,
-                c.expires_at,
-                c.is_active,
+                c.expires_at AS content_expires_at,
+                c.is_active AS content_active,
+
                 s.link_code,
-                s.expires_at,
-                s.is_active
+                s.expires_at AS link_expires_at,
+                s.is_active AS link_active
+
             FROM store_links AS s
+
             JOIN content AS c
                 ON c.id = s.content_id
+
             WHERE s.link_code = ?
+
             LIMIT 1
             """,
             (link_code,),
-        )
-
-        row = cursor.fetchone()
+        ).fetchone()
 
         if not row:
             return None
 
-        (
-            content_id,
-            content_type,
-            file_id,
-            text_content,
-            content_url,
-            content_expiry,
-            content_active,
-            stored_code,
-            link_expiry,
-            link_active,
-        ) = row
-
-        if not link_active or not content_active:
+        if not row["link_active"] or not row["content_active"]:
             return None
 
-        now = utc_now()
+        link_expiry = parse_datetime(
+            row["link_expires_at"]
+        )
 
-        parsed_link_expiry = parse_datetime(link_expiry)
-        parsed_content_expiry = parse_datetime(content_expiry)
+        content_expiry = parse_datetime(
+            row["content_expires_at"]
+        )
 
-        if not parsed_link_expiry or not parsed_content_expiry:
+        if not link_expiry or not content_expiry:
             return None
 
-        if now >= parsed_link_expiry or now >= parsed_content_expiry:
-            cursor.execute(
+        if now >= link_expiry or now >= content_expiry:
+            conn.execute(
                 """
                 UPDATE store_links
                 SET is_active = 0
                 WHERE link_code = ?
                 """,
-                (stored_code,),
+                (link_code,),
             )
-
-            conn.commit()
 
             return None
 
         return {
-            "id": content_id,
-            "content_type": content_type,
-            "file_id": file_id,
-            "text_content": text_content,
-            "content_url": content_url,
+            "id": row["content_id"],
+            "content_type": row["content_type"],
+            "file_id": row["file_id"],
+            "text_content": row["text_content"],
+            "content_url": row["content_url"],
         }
 
-    finally:
-        conn.close()
+
+# ==========================================================
+# STORE LINK URL
+# ==========================================================
+
+async def get_store_link_url(context, link_code):
+    bot_info = await context.bot.get_me()
+
+    return (
+        f"https://t.me/{bot_info.username}"
+        f"?start={link_code}"
+    )
+
+
+# ==========================================================
+# SEND CREATED STORE LINKS
+# ==========================================================
+
+async def send_created_links(
+    message,
+    link_codes,
+    context,
+):
+    if not link_codes:
+        await message.reply_text(
+            "No Store Links were created."
+        )
+        return
+
+    bot_info = await context.bot.get_me()
+
+    lines = [
+        "✅ STORE LINKS CREATED",
+        "",
+        f"Total Links: {len(link_codes)}",
+        "",
+    ]
+
+    for index, code in enumerate(link_codes, start=1):
+        link = (
+            f"https://t.me/{bot_info.username}"
+            f"?start={code}"
+        )
+
+        lines.append(f"{index}. {link}")
+
+    # Split output to stay within Telegram's limits.
+    chunks = []
+    current = ""
+
+    for line in lines:
+        candidate = (
+            current + "\n" + line
+            if current
+            else line
+        )
+
+        if len(candidate) > MAX_TELEGRAM_MESSAGE_LENGTH:
+            if current:
+                chunks.append(current)
+
+            current = line
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        await message.reply_text(chunk)
 
 
 # ==========================================================
@@ -281,14 +367,12 @@ def get_join_keyboard(link_code=None):
     buttons = []
 
     for channel in FORCE_JOIN_CHANNELS:
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    f"Join {channel['title']}",
-                    url=channel["url"],
-                )
-            ]
-        )
+        buttons.append([
+            InlineKeyboardButton(
+                f"Join {channel['title']}",
+                url=channel["url"],
+            )
+        ])
 
     callback_data = (
         f"check_join:{link_code}"
@@ -296,14 +380,12 @@ def get_join_keyboard(link_code=None):
         else "check_join:direct"
     )
 
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                "Check Membership",
-                callback_data=callback_data,
-            )
-        ]
-    )
+    buttons.append([
+        InlineKeyboardButton(
+            "✅ Check Membership",
+            callback_data=callback_data,
+        )
+    ])
 
     return InlineKeyboardMarkup(buttons)
 
@@ -317,9 +399,7 @@ async def check_membership(
     user_id: int,
 ):
     """
-    Check whether the user has joined every configured channel.
-
-    The bot must be able to access each channel and check members.
+    Require membership in every configured channel/group.
     """
 
     for channel in FORCE_JOIN_CHANNELS:
@@ -343,13 +423,13 @@ async def check_membership(
 
         except TelegramError as exc:
             logger.warning(
-                "Membership check failed for channel %s: %s",
+                "Membership check failed for %s: %s",
                 channel["title"],
                 exc,
             )
 
-            # Fail closed: don't deliver protected content
-            # if membership cannot be verified.
+            # Never release content when membership
+            # cannot be verified.
             return False
 
     return True
@@ -364,8 +444,9 @@ async def show_force_join(
     link_code=None,
 ):
     await message.reply_text(
-        "Please join all the required channels below, "
-        "then click Check Membership.",
+        "🔒 JOIN REQUIRED CHANNELS\n\n"
+        "Please join all the channels below, then tap "
+        "Check Membership to continue.",
         reply_markup=get_join_keyboard(link_code),
     )
 
@@ -384,12 +465,20 @@ async def send_login_not_confirmed(message):
 
 
 # ==========================================================
+# CONTENT PROTECTION
+# ==========================================================
+
+def protection_enabled():
+    return database.get_content_protection()
+
+
+# ==========================================================
 # CONTENT DELIVERY
 # ==========================================================
 
 async def send_content(message, item):
     """
-    Deliver the content associated with one valid Store Link.
+    Send only the item associated with the supplied Store Link.
     """
 
     content_type = item["content_type"]
@@ -397,64 +486,67 @@ async def send_content(message, item):
     text_content = item["text_content"]
     content_url = item["content_url"]
 
+    protect = protection_enabled()
+
     try:
         if content_type == "text":
             await message.reply_text(
                 text_content or "",
-                protect_content=True,
+                protect_content=protect,
             )
 
         elif content_type == "url":
             await message.reply_text(
                 content_url or "",
-                protect_content=True,
+                protect_content=protect,
             )
 
         elif content_type == "photo":
             await message.reply_photo(
                 photo=file_id,
-                protect_content=True,
+                protect_content=protect,
             )
 
         elif content_type == "video":
             await message.reply_video(
                 video=file_id,
-                protect_content=True,
+                protect_content=protect,
             )
 
         elif content_type == "document":
             await message.reply_document(
                 document=file_id,
-                protect_content=True,
+                protect_content=protect,
             )
 
         elif content_type == "audio":
             await message.reply_audio(
                 audio=file_id,
-                protect_content=True,
+                protect_content=protect,
             )
 
         elif content_type == "animation":
             await message.reply_animation(
                 animation=file_id,
-                protect_content=True,
+                protect_content=protect,
             )
 
         elif content_type == "voice":
             await message.reply_voice(
                 voice=file_id,
-                protect_content=True,
+                protect_content=protect,
             )
 
         elif content_type == "video_note":
             await message.reply_video_note(
                 video_note=file_id,
-                protect_content=True,
+                protect_content=protect,
             )
 
         elif content_type == "sticker":
             await message.reply_sticker(
                 sticker=file_id,
+                protect_content=protect,
             )
 
         else:
@@ -488,10 +580,9 @@ async def start(
     if not message or not user:
         return
 
-    # Register the user for statistics and broadcasts.
     database.add_user(user.id)
 
-    # No Store Link supplied.
+    # Direct /start without a Store Link.
     if not context.args:
         joined = await check_membership(
             context,
@@ -505,10 +596,15 @@ async def start(
         await send_login_not_confirmed(message)
         return
 
-    # Only accept one Store Link token.
+    # Accept exactly one Store Link code.
+    if len(context.args) != 1:
+        await message.reply_text(
+            "Invalid Store Link. Please open the original link."
+        )
+        return
+
     link_code = context.args[0].strip()
 
-    # Reject invalid or expired links.
     item = get_valid_item(link_code)
 
     if not item:
@@ -545,19 +641,17 @@ async def check_join_callback(
     if not query:
         return
 
-    await query.answer()
-
-    user = query.from_user
     data = query.data or ""
 
     if not data.startswith("check_join:"):
+        await query.answer()
         return
 
     link_code = data.split(":", 1)[1]
 
     joined = await check_membership(
         context,
-        user.id,
+        query.from_user.id,
     )
 
     if not joined:
@@ -567,7 +661,8 @@ async def check_join_callback(
         )
         return
 
-    # Direct start has no content link.
+    await query.answer("Membership verified.")
+
     if link_code == "direct":
         try:
             await query.edit_message_text(
@@ -581,7 +676,7 @@ async def check_join_callback(
 
         return
 
-    # Re-check the link after membership verification.
+    # Revalidate link after membership verification.
     item = get_valid_item(link_code)
 
     if not item:
@@ -596,7 +691,7 @@ async def check_join_callback(
 
     try:
         await query.edit_message_text(
-            "Membership verified. Your content is being sent."
+            "Membership verified. Sending your content..."
         )
     except TelegramError:
         pass
@@ -608,32 +703,34 @@ async def check_join_callback(
 
 
 # ==========================================================
-# URL DETECTION
+# URL VALIDATION
 # ==========================================================
 
-URL_PATTERN = re.compile(
-    r"https?://[^\s<>]+",
-    re.IGNORECASE,
-)
-
-
 def is_valid_url(value):
+    if not value:
+        return False
+
+    value = value.strip()
+
+    if re.search(r"\s", value):
+        return False
+
     try:
-        parsed = urlparse(value.strip())
+        parsed = urlparse(value)
 
         return (
             parsed.scheme in ("http", "https")
-            and bool(parsed.netloc)
+            and bool(parsed.hostname)
+            and "." in parsed.hostname
         )
 
-    except ValueError:
+    except (ValueError, TypeError):
         return False
 
 
 def extract_bulk_urls(text):
     """
-    Treat a message as a bulk URL submission only when every
-    non-empty line is a valid URL.
+    Return URLs only if every non-empty line is a valid URL.
     """
 
     lines = [
@@ -652,72 +749,15 @@ def extract_bulk_urls(text):
 
 
 # ==========================================================
-# STORE LINK RESPONSE
+# ADMIN ACTION HELPERS
 # ==========================================================
 
-async def send_created_links(
-    message,
-    link_codes,
-    context,
-):
-    bot_username = context.bot.username
-
-    if not bot_username:
-        bot_info = await context.bot.get_me()
-        bot_username = bot_info.username
-
-    lines = [
-        f"Total Store Links Created: {len(link_codes)}",
-        "",
-    ]
-
-    for index, code in enumerate(link_codes, start=1):
-        link = f"https://t.me/{bot_username}?start={code}"
-
-        lines.append(f"{index}. {link}")
-
-    result = "\n".join(lines)
-
-    # Avoid Telegram's message-length limit.
-    chunks = []
-    current = ""
-
-    for line in result.splitlines():
-        candidate = current + ("\n" if current else "") + line
-
-        if len(candidate) > 3500:
-            chunks.append(current)
-            current = line
-        else:
-            current = candidate
-
-    if current:
-        chunks.append(current)
-
-    for chunk in chunks:
-        await message.reply_text(chunk)
+def get_admin_action(context):
+    return context.user_data.get("admin_action")
 
 
 # ==========================================================
-# ADMIN ACTION CHECK
-# ==========================================================
-
-def has_pending_admin_action(user_id):
-    """
-    Avoid processing a message as new content while the admin
-    is using an Admin Panel action.
-    """
-
-    action_map = getattr(admin, "admin_action", {})
-
-    if isinstance(action_map, dict):
-        return bool(action_map.get(user_id))
-
-    return False
-
-
-# ==========================================================
-# CONTENT HANDLER
+# ADMIN CONTENT CREATION
 # ==========================================================
 
 async def handle_admin_content(
@@ -730,147 +770,116 @@ async def handle_admin_content(
     if not message or not user:
         return
 
-    # Only configured admins may create Store Links.
     if not is_admin(user.id):
         return
 
-    # Let the Admin Panel process its own input first.
-    if has_pending_admin_action(user.id):
+    # Do not let ordinary content handling interfere with
+    # active Admin Panel actions.
+    if get_admin_action(context):
+        return
+
+    # Ordinary text must not create links.
+    # URLs are accepted only through Admin Panel > Add Link.
+    if message.text and not message.text.startswith("/"):
+        await message.reply_text(
+            "To create URL Store Links, open /admin and select "
+            "➕ Add Link.\n\n"
+            "To create a media Store Link, send a media file."
+        )
         return
 
     # ------------------------------------------------------
-    # MULTIPLE URLS
+    # MEDIA TYPE DETECTION
     # ------------------------------------------------------
 
-    if message.text and not message.text.startswith("/"):
-        urls = extract_bulk_urls(message.text)
-
-        if urls:
-            link_codes = []
-
-            try:
-                for url in urls:
-                    code = create_store_link(
-                        content_type="url",
-                        content_url=url,
-                    )
-                    link_codes.append(code)
-
-                await send_created_links(
-                    message,
-                    link_codes,
-                    context,
-                )
-
-            except Exception:
-                logger.exception("Bulk URL creation failed")
-
-                await message.reply_text(
-                    "Failed to create all Store Links. "
-                    "Please check the server logs."
-                )
-
-            return
-
-    # ------------------------------------------------------
-    # PHOTO
-    # ------------------------------------------------------
+    file_id = None
+    content_type = None
 
     if message.photo:
         file_id = message.photo[-1].file_id
         content_type = "photo"
 
-    # ------------------------------------------------------
-    # VIDEO
-    # ------------------------------------------------------
-
     elif message.video:
         file_id = message.video.file_id
         content_type = "video"
-
-    # ------------------------------------------------------
-    # DOCUMENT
-    # ------------------------------------------------------
 
     elif message.document:
         file_id = message.document.file_id
         content_type = "document"
 
-    # ------------------------------------------------------
-    # AUDIO
-    # ------------------------------------------------------
-
     elif message.audio:
         file_id = message.audio.file_id
         content_type = "audio"
-
-    # ------------------------------------------------------
-    # ANIMATION / GIF
-    # ------------------------------------------------------
 
     elif message.animation:
         file_id = message.animation.file_id
         content_type = "animation"
 
-    # ------------------------------------------------------
-    # VOICE
-    # ------------------------------------------------------
-
     elif message.voice:
         file_id = message.voice.file_id
         content_type = "voice"
-
-    # ------------------------------------------------------
-    # VIDEO NOTE
-    # ------------------------------------------------------
 
     elif message.video_note:
         file_id = message.video_note.file_id
         content_type = "video_note"
 
-    # ------------------------------------------------------
-    # STICKER
-    # ------------------------------------------------------
-
     elif message.sticker:
         file_id = message.sticker.file_id
         content_type = "sticker"
 
-    # ------------------------------------------------------
-    # TEXT
-    # ------------------------------------------------------
-
-    elif message.text and not message.text.startswith("/"):
-        file_id = None
-        content_type = "text"
-
     else:
         return
 
+    # ------------------------------------------------------
+    # CREATE ONE LINK FOR THIS MEDIA ITEM
+    # ------------------------------------------------------
+
     try:
-        code = create_store_link(
+        link_code = create_store_link(
             content_type=content_type,
             file_id=file_id,
-            text_content=(
-                message.text
-                if content_type == "text"
-                else None
-            ),
         )
 
         await send_created_links(
             message,
-            [code],
+            [link_code],
             context,
         )
 
     except Exception:
-        logger.exception("Content link creation failed")
+        logger.exception(
+            "Failed to create media Store Link."
+        )
 
         await message.reply_text(
             "Failed to create the Store Link. "
-            "Please check the server logs."
+            "Please check the bot logs."
         )
+
+
+# ==========================================================
+# BULK URL CREATION FOR ADMIN PANEL
+# ==========================================================
+
+async def create_url_store_links(urls):
+    created = []
+    failed = []
+
+    for url in urls:
+        try:
+            code = create_store_link(
+                content_type="url",
+                content_url=url,
+            )
+            created.append(code)
+
+        except Exception:
+            logger.exception(
+                "Failed to create URL Store Link."
+            )
+            failed.append(url)
+
+    return created, failed
 
 
 # ==========================================================
@@ -892,9 +901,12 @@ async def error_handler(
 # ==========================================================
 
 def main():
-    if not BOT_TOKEN or BOT_TOKEN == "hide":
+    if not BOT_TOKEN or BOT_TOKEN in (
+        "hide",
+        "PASTE_YOUR_BOT_TOKEN_HERE",
+    ):
         raise ValueError(
-            "Set your actual Telegram bot token in config.py."
+            "Set your real Telegram bot token in config.py."
         )
 
     if len(FORCE_JOIN_CHANNELS) > 6:
@@ -910,19 +922,13 @@ def main():
         .build()
     )
 
-    # ------------------------------------------------------
-    # START
-    # ------------------------------------------------------
-
+    # Start command.
     application.add_handler(
         CommandHandler("start", start),
         group=0,
     )
 
-    # ------------------------------------------------------
-    # MEMBERSHIP CALLBACK
-    # ------------------------------------------------------
-
+    # Membership verification callback.
     application.add_handler(
         CallbackQueryHandler(
             check_join_callback,
@@ -931,24 +937,15 @@ def main():
         group=0,
     )
 
-    # ------------------------------------------------------
-    # ADMIN PANEL
-    # ------------------------------------------------------
-
+    # Admin Panel.
     admin.register_admin_handlers(application)
 
-    # ------------------------------------------------------
-    # CONTENT HANDLER
-    # ------------------------------------------------------
-
-    # Group 2 allows the Admin Panel's group-1 message handler
-    # to process its own input first.
-    content_filter = (
+    # Admin media uploads.
+    media_filter = (
         filters.User(user_id=list(ADMIN_IDS))
         & ~filters.COMMAND
         & (
-            filters.TEXT
-            | filters.PHOTO
+            filters.PHOTO
             | filters.VIDEO
             | filters.Document.ALL
             | filters.AUDIO
@@ -961,27 +958,28 @@ def main():
 
     application.add_handler(
         MessageHandler(
-            content_filter,
+            media_filter,
             handle_admin_content,
         ),
         group=2,
     )
 
-    # ------------------------------------------------------
-    # EXPIRY CLEANUP
-    # ------------------------------------------------------
-
+    # Expiry cleanup.
     if application.job_queue:
+        async def expiry_cleanup_job(context):
+            try:
+                database.deactivate_expired_links()
+            except Exception:
+                logger.exception(
+                    "Expiry cleanup failed."
+                )
+
         application.job_queue.run_repeating(
-            lambda context: database.deactivate_expired_links(),
+            expiry_cleanup_job,
             interval=60,
             first=10,
             name="expiry_cleanup",
         )
-
-    # ------------------------------------------------------
-    # ERROR HANDLER
-    # ------------------------------------------------------
 
     application.add_error_handler(error_handler)
 
