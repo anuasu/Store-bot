@@ -4,197 +4,148 @@ import logging
 
 from datetime import datetime, timedelta, timezone
 
-from config import (
-    DATABASE_FILE,
-    CONTENT_TTL_MINUTES,
-    CONTENT_PROTECTION_ENABLED,
-)
+import config
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("database")
+
+DATABASE_FILE = config.DATABASE_FILE
+DEFAULT_TTL_MINUTES = config.CONTENT_TTL_MINUTES
+DEFAULT_PROTECTION = config.CONTENT_PROTECTION_ENABLED
 
 
-# ==========================================
-# DATABASE CONNECTION
-# ==========================================
+# =========================================================
+# CONNECTION
+# =========================================================
 
 def get_connection():
-    """Create a database connection."""
+    os.makedirs(os.path.dirname(DATABASE_FILE), exist_ok=True)
 
-    db_dir = os.path.dirname(DATABASE_FILE)
-
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-
-    conn = sqlite3.connect(
+    connection = sqlite3.connect(
         DATABASE_FILE,
         timeout=30,
     )
 
-    conn.row_factory = sqlite3.Row
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 30000")
 
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 30000")
-
-    return conn
+    return connection
 
 
-# ==========================================
+# =========================================================
 # TIME HELPERS
-# ==========================================
+# =========================================================
 
 def utc_now():
-    """Return current UTC datetime."""
-
     return datetime.now(timezone.utc)
 
 
 def utc_timestamp():
-    """Return current UTC timestamp as a string."""
-
-    return utc_now().strftime("%Y-%m-%d %H:%M:%S")
+    return utc_now().isoformat()
 
 
 def calculate_expiry(minutes=None):
-    """Calculate content expiry timestamp."""
-
     if minutes is None:
         minutes = get_content_ttl_minutes()
 
-    if int(minutes) <= 0:
-        return None
+    minutes = int(minutes)
 
-    expiry = utc_now() + timedelta(minutes=int(minutes))
+    if minutes < 1:
+        raise ValueError("Expiry must be at least one minute.")
 
-    return expiry.strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        utc_now() + timedelta(minutes=minutes)
+    ).isoformat()
 
 
 def parse_timestamp(value):
-    """Convert a database timestamp into a UTC datetime."""
-
     if not value:
         return None
 
     try:
-        parsed = datetime.strptime(
-            value,
-            "%Y-%m-%d %H:%M:%S",
-        )
+        parsed = datetime.fromisoformat(value)
 
-        return parsed.replace(tzinfo=timezone.utc)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
 
-    except (ValueError, TypeError):
+        return parsed.astimezone(timezone.utc)
+
+    except (TypeError, ValueError):
         return None
 
 
-# ==========================================
+# =========================================================
 # DATABASE INITIALIZATION
-# ==========================================
+# =========================================================
 
 def init_db():
-    """Create tables, indexes and default settings."""
+    os.makedirs(os.path.dirname(DATABASE_FILE), exist_ok=True)
 
-    with get_connection() as conn:
-
-        # USERS
-        conn.execute("""
+    with get_connection() as connection:
+        connection.executescript(
+            """
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                first_seen TEXT NOT NULL
-            )
-        """)
+                created_at TEXT NOT NULL
+            );
 
-        # CONTENT
-        conn.execute("""
             CREATE TABLE IF NOT EXISTS content (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content_type TEXT NOT NULL,
+                content_data TEXT,
                 file_id TEXT,
-                text_content TEXT,
-                content_url TEXT,
+                caption TEXT,
                 created_at TEXT NOT NULL,
-                expires_at TEXT,
-                is_active INTEGER NOT NULL DEFAULT 1
-            )
-        """)
+                expires_at TEXT NOT NULL
+            );
 
-        # STORE LINKS
-        conn.execute("""
             CREATE TABLE IF NOT EXISTS store_links (
                 link_code TEXT PRIMARY KEY,
                 content_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                expires_at TEXT,
+                expires_at TEXT NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 1,
-
-                FOREIGN KEY (content_id)
+                FOREIGN KEY(content_id)
                     REFERENCES content(id)
-            )
-        """)
+            );
 
-        # SETTINGS
-        conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
-                setting_key TEXT PRIMARY KEY,
-                setting_value TEXT NOT NULL
-            )
-        """)
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
 
-        # BACKUP HISTORY
-        conn.execute("""
             CREATE TABLE IF NOT EXISTS backups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                backup_type TEXT NOT NULL
-            )
-        """)
+                backup_path TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
 
-        # INDEXES
-        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_store_links_content
+                ON store_links(content_id);
+
+            CREATE INDEX IF NOT EXISTS idx_store_links_active
+                ON store_links(is_active);
+
+            CREATE INDEX IF NOT EXISTS idx_store_links_expiry
+                ON store_links(expires_at);
+
             CREATE INDEX IF NOT EXISTS idx_content_expiry
-            ON content(expires_at)
-        """)
+                ON content(expires_at);
+            """
+        )
 
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_content_active
-            ON content(is_active)
-        """)
-
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_links_content
-            ON store_links(content_id)
-        """)
-
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_links_expiry
-            ON store_links(expires_at)
-        """)
-
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_users_first_seen
-            ON users(first_seen)
-        """)
-
-        # DEFAULT SETTINGS
         defaults = {
-            "content_ttl_minutes": str(
-                CONTENT_TTL_MINUTES
-            ),
+            "content_ttl_minutes": str(DEFAULT_TTL_MINUTES),
             "content_protection_enabled": (
-                "1"
-                if CONTENT_PROTECTION_ENABLED
-                else "0"
+                "1" if DEFAULT_PROTECTION else "0"
             ),
             "auto_delete_minutes": "0",
         }
 
         for key, value in defaults.items():
-            conn.execute(
+            connection.execute(
                 """
-                INSERT OR IGNORE INTO settings (
-                    setting_key,
-                    setting_value
-                )
+                INSERT OR IGNORE INTO settings (key, value)
                 VALUES (?, ?)
                 """,
                 (key, value),
@@ -203,34 +154,24 @@ def init_db():
     logger.info("Database initialized successfully.")
 
 
-# ==========================================
-# USER FUNCTIONS
-# ==========================================
+# =========================================================
+# USERS
+# =========================================================
 
 def add_user(user_id):
-    """Add a new user or retain an existing user."""
-
-    with get_connection() as conn:
-        conn.execute(
+    with get_connection() as connection:
+        connection.execute(
             """
-            INSERT OR IGNORE INTO users (
-                user_id,
-                first_seen
-            )
+            INSERT OR IGNORE INTO users (user_id, created_at)
             VALUES (?, ?)
             """,
-            (
-                int(user_id),
-                utc_timestamp(),
-            ),
+            (int(user_id), utc_timestamp()),
         )
 
 
 def get_all_user_ids():
-    """Return all registered user IDs."""
-
-    with get_connection() as conn:
-        rows = conn.execute(
+    with get_connection() as connection:
+        rows = connection.execute(
             "SELECT user_id FROM users"
         ).fetchall()
 
@@ -238,104 +179,79 @@ def get_all_user_ids():
 
 
 def get_total_users():
-    """Return total registered users."""
-
-    with get_connection() as conn:
-        row = conn.execute(
+    with get_connection() as connection:
+        row = connection.execute(
             "SELECT COUNT(*) AS total FROM users"
         ).fetchone()
 
-    return row["total"]
+    return int(row["total"])
 
 
-# ==========================================
-# SETTINGS FUNCTIONS
-# ==========================================
+# =========================================================
+# SETTINGS
+# =========================================================
 
 def get_setting(key, default=None):
-    """Read a setting from the database."""
-
-    with get_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT setting_value
-            FROM settings
-            WHERE setting_key = ?
-            """,
-            (str(key),),
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (key,),
         ).fetchone()
 
     if row is None:
         return default
 
-    return row["setting_value"]
+    return row["value"]
 
 
 def set_setting(key, value):
-    """Save or update a setting."""
-
-    with get_connection() as conn:
-        conn.execute(
+    with get_connection() as connection:
+        connection.execute(
             """
-            INSERT INTO settings (
-                setting_key,
-                setting_value
-            )
+            INSERT INTO settings (key, value)
             VALUES (?, ?)
-
-            ON CONFLICT(setting_key)
-            DO UPDATE SET
-                setting_value = excluded.setting_value
+            ON CONFLICT(key)
+            DO UPDATE SET value = excluded.value
             """,
-            (
-                str(key),
-                str(value),
-            ),
+            (str(key), str(value)),
         )
 
 
-# ==========================================
-# CONTENT EXPIRY SETTINGS
-# ==========================================
+# =========================================================
+# CONTENT EXPIRY TIMER
+# =========================================================
 
 def get_content_ttl_minutes():
-    """Get the current content expiry duration."""
-
     value = get_setting(
         "content_ttl_minutes",
-        str(CONTENT_TTL_MINUTES),
+        str(DEFAULT_TTL_MINUTES),
     )
 
     try:
-        return max(0, int(value))
-    except (ValueError, TypeError):
-        return max(0, int(CONTENT_TTL_MINUTES))
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return int(DEFAULT_TTL_MINUTES)
 
 
 def set_content_ttl_minutes(minutes):
-    """Update the expiry duration for newly created links."""
-
     minutes = int(minutes)
 
-    if minutes < 0:
-        raise ValueError("Expiry duration cannot be negative.")
+    if not 1 <= minutes <= 10080:
+        raise ValueError(
+            "Timer must be between 1 and 10080 minutes."
+        )
 
-    set_setting(
-        "content_ttl_minutes",
-        minutes,
-    )
+    set_setting("content_ttl_minutes", minutes)
 
 
-# ==========================================
-# CONTENT PROTECTION SETTINGS
-# ==========================================
+# =========================================================
+# CONTENT PROTECTION
+# =========================================================
 
 def get_content_protection():
-    """Check whether content protection is enabled."""
-
     value = get_setting(
         "content_protection_enabled",
-        "1" if CONTENT_PROTECTION_ENABLED else "0",
+        "1" if DEFAULT_PROTECTION else "0",
     )
 
     return str(value).lower() in (
@@ -347,101 +263,175 @@ def get_content_protection():
 
 
 def set_content_protection(enabled):
-    """Enable or disable Telegram content protection."""
-
     set_setting(
         "content_protection_enabled",
         "1" if enabled else "0",
     )
 
 
-# ==========================================
+# =========================================================
+# AUTO DELETE
+# =========================================================
+
+def get_auto_delete_minutes():
+    value = get_setting("auto_delete_minutes", "0")
+
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return 0
+
+    return minutes if minutes in (0, 5, 10, 15, 30) else 0
+
+
+def set_auto_delete_minutes(minutes):
+    minutes = int(minutes)
+
+    if minutes not in (0, 5, 10, 15, 30):
+        raise ValueError(
+            "Auto-delete must be 0, 5, 10, 15, or 30 minutes."
+        )
+
+    set_setting("auto_delete_minutes", minutes)
+
+
+# =========================================================
 # STATISTICS
-# ==========================================
+# =========================================================
+
+def get_total_content_count():
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS total FROM content"
+        ).fetchone()
+
+    return int(row["total"])
+
 
 def get_active_links_count():
-    """Count active links that have not expired."""
-
     now = utc_timestamp()
 
-    with get_connection() as conn:
-        row = conn.execute(
+    with get_connection() as connection:
+        row = connection.execute(
             """
             SELECT COUNT(*) AS total
             FROM store_links
             WHERE is_active = 1
-              AND (
-                    expires_at IS NULL
-                    OR expires_at > ?
-              )
+              AND expires_at > ?
             """,
             (now,),
         ).fetchone()
 
-    return row["total"]
-
-
-def get_total_content_count():
-    """Count active content entries."""
-
-    with get_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS total
-            FROM content
-            WHERE is_active = 1
-            """
-        ).fetchone()
-
-    return row["total"]
+    return int(row["total"])
 
 
 def get_statistics():
-    """Return statistics for the admin panel."""
+    now = utc_timestamp()
+
+    with get_connection() as connection:
+        total_users = connection.execute(
+            "SELECT COUNT(*) FROM users"
+        ).fetchone()[0]
+
+        total_content = connection.execute(
+            "SELECT COUNT(*) FROM content"
+        ).fetchone()[0]
+
+        active_links = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM store_links
+            WHERE is_active = 1
+              AND expires_at > ?
+            """,
+            (now,),
+        ).fetchone()[0]
+
+        expired_pending = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM store_links
+            WHERE is_active = 1
+              AND expires_at <= ?
+            """,
+            (now,),
+        ).fetchone()[0]
 
     return {
-        "total_users": get_total_users(),
-        "total_content": get_total_content_count(),
-        "active_links": get_active_links_count(),
+        "total_users": total_users,
+        "total_content": total_content,
+        "total_items": total_content,
+        "active_links": active_links,
+        "expired_pending_deactivation": expired_pending,
     }
 
 
-# ==========================================
-# BACKUP HISTORY
-# ==========================================
+# =========================================================
+# STORE LINK MANAGEMENT
+# =========================================================
 
-def record_backup(filename, backup_type="manual"):
-    """Record a completed backup in the database."""
-
-    with get_connection() as conn:
-        cursor = conn.execute(
+def deactivate_link(link_code):
+    with get_connection() as connection:
+        cursor = connection.execute(
             """
-            INSERT INTO backups (
-                filename,
-                created_at,
-                backup_type
-            )
-            VALUES (?, ?, ?)
+            UPDATE store_links
+            SET is_active = 0
+            WHERE link_code = ?
+              AND is_active = 1
             """,
-            (
-                os.path.basename(filename),
-                utc_timestamp(),
-                str(backup_type),
-            ),
+            (link_code,),
         )
 
-        return cursor.lastrowid
+    return cursor.rowcount > 0
+
+
+def deactivate_expired_links():
+    now = utc_timestamp()
+
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE store_links
+            SET is_active = 0
+            WHERE is_active = 1
+              AND expires_at <= ?
+            """,
+            (now,),
+        )
+
+    count = cursor.rowcount
+
+    if count:
+        logger.info(
+            "Deactivated %s expired Store Links.",
+            count,
+        )
+
+    return count
+
+
+# =========================================================
+# BACKUP HISTORY
+# =========================================================
+
+def record_backup(backup_path):
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO backups (backup_path, created_at)
+            VALUES (?, ?)
+            """,
+            (str(backup_path), utc_timestamp()),
+        )
 
 
 def get_backup_history(limit=10):
-    """Return the latest backup records."""
-
     limit = max(1, min(int(limit), 100))
 
-    with get_connection() as conn:
-        rows = conn.execute(
+    with get_connection() as connection:
+        rows = connection.execute(
             """
-            SELECT id, filename, created_at, backup_type
+            SELECT id, backup_path, created_at
             FROM backups
             ORDER BY id DESC
             LIMIT ?
@@ -452,105 +442,31 @@ def get_backup_history(limit=10):
     return [dict(row) for row in rows]
 
 
-# ==========================================
-# LINK MANAGEMENT
-# ==========================================
+# =========================================================
+# OPTIONAL LOOKUP HELPERS
+# =========================================================
 
-def deactivate_link(link_code):
-    """Deactivate a particular store link."""
-
-    with get_connection() as conn:
-        cursor = conn.execute(
+def get_link_details(link_code):
+    with get_connection() as connection:
+        row = connection.execute(
             """
-            UPDATE store_links
-            SET is_active = 0
-            WHERE link_code = ?
-              AND is_active = 1
+            SELECT
+                sl.link_code,
+                sl.content_id,
+                sl.is_active,
+                sl.created_at AS link_created_at,
+                sl.expires_at AS link_expires_at,
+                c.content_type,
+                c.content_data,
+                c.file_id,
+                c.caption,
+                c.created_at AS content_created_at,
+                c.expires_at AS content_expires_at
+            FROM store_links sl
+            JOIN content c ON c.id = sl.content_id
+            WHERE sl.link_code = ?
             """,
-            (str(link_code),),
-        )
+            (link_code,),
+        ).fetchone()
 
-        return cursor.rowcount > 0
-
-
-def deactivate_expired_links():
-    """
-    Deactivate expired links and their associated content
-    when no other active link references that content.
-    """
-
-    now = utc_timestamp()
-
-    with get_connection() as conn:
-
-        cursor = conn.execute(
-            """
-            UPDATE store_links
-            SET is_active = 0
-            WHERE is_active = 1
-              AND expires_at IS NOT NULL
-              AND expires_at <= ?
-            """,
-            (now,),
-        )
-
-        deactivated_links = cursor.rowcount
-
-        conn.execute(
-            """
-            UPDATE content
-            SET is_active = 0
-            WHERE is_active = 1
-              AND expires_at IS NOT NULL
-              AND expires_at <= ?
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM store_links
-                  WHERE store_links.content_id = content.id
-                    AND store_links.is_active = 1
-              )
-            """,
-            (now,),
-        )
-
-    return deactivated_links
-
-
-# ==========================================
-# AUTO-DELETE SETTINGS
-# ==========================================
-
-def get_auto_delete_minutes():
-    """Get the delay for deleting bot-sent messages."""
-
-    value = get_setting(
-        "auto_delete_minutes",
-        "0",
-    )
-
-    try:
-        minutes = int(value)
-
-        if minutes in (0, 5, 10, 15, 30):
-            return minutes
-
-        return 0
-
-    except (ValueError, TypeError):
-        return 0
-
-
-def set_auto_delete_minutes(minutes):
-    """Set auto-delete delay: OFF, 5, 10, 15 or 30 minutes."""
-
-    minutes = int(minutes)
-
-    if minutes not in (0, 5, 10, 15, 30):
-        raise ValueError(
-            "Allowed values are 0, 5, 10, 15 and 30."
-        )
-
-    set_setting(
-        "auto_delete_minutes",
-        minutes,
-    )
+    return dict(row) if row else None
