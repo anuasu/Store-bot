@@ -16,6 +16,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    TypeHandler,
 )
 
 import config
@@ -37,6 +38,28 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = config.BOT_TOKEN
 ADMIN_IDS = set(config.ADMIN_IDS)
 FORCE_JOIN_CHANNELS = config.FORCE_JOIN_CHANNELS
+
+
+# =========================================================
+# CALLBACK DEBUG LOGGER
+# =========================================================
+
+async def log_callback_updates(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    """
+    Debugging handler:
+    Logs callback queries before other handlers process them.
+    """
+    query = update.callback_query
+
+    if query:
+        logger.info(
+            "CALLBACK RECEIVED | user_id=%s | data=%r",
+            query.from_user.id,
+            query.data,
+        )
 
 
 # =========================================================
@@ -74,7 +97,9 @@ def get_expiry_time(minutes=None):
     minutes = int(minutes)
 
     if minutes < 1:
-        raise ValueError("Expiry must be at least one minute.")
+        raise ValueError(
+            "Expiry must be at least one minute."
+        )
 
     return (
         utc_now() + timedelta(minutes=minutes)
@@ -158,10 +183,9 @@ def create_store_link(
         )
 
     link_code = secrets.token_urlsafe(12)
-
     expiry = get_expiry_time()
 
-    # Save content and link in one database transaction.
+    # Save content and link in one transaction.
     with sqlite3.connect(
         config.DATABASE_FILE,
         timeout=30,
@@ -288,7 +312,7 @@ def get_valid_item(link_code):
 
 
 # =========================================================
-# FORCE JOIN
+# FORCE JOIN KEYBOARD
 # =========================================================
 
 def force_join_keyboard(link_code=None):
@@ -316,6 +340,10 @@ def force_join_keyboard(link_code=None):
     return InlineKeyboardMarkup(buttons)
 
 
+# =========================================================
+# FORCE JOIN MEMBERSHIP CHECK
+# =========================================================
+
 async def check_membership(user_id, context):
     for channel in FORCE_JOIN_CHANNELS:
         try:
@@ -342,7 +370,8 @@ async def check_membership(user_id, context):
 
         except TelegramError:
             logger.exception(
-                "Membership check failed: channel=%s user=%s",
+                "Membership check failed: "
+                "channel=%s user=%s",
                 channel.get("title"),
                 user_id,
             )
@@ -376,6 +405,7 @@ def content_protection_enabled():
         return bool(
             database.get_content_protection()
         )
+
     except Exception:
         logger.exception(
             "Could not read content protection setting"
@@ -391,6 +421,7 @@ def get_auto_delete_minutes():
         return int(
             database.get_auto_delete_minutes() or 0
         )
+
     except Exception:
         logger.exception(
             "Could not read auto-delete setting"
@@ -573,7 +604,7 @@ async def start_command(
 
     args = context.args
 
-    # Direct /start: no content is delivered.
+    # Direct /start: do not deliver content.
     if not args:
         joined = await check_membership(
             user.id,
@@ -618,7 +649,7 @@ async def start_command(
 
 
 # =========================================================
-# MEMBERSHIP CALLBACK
+# FORCE JOIN CALLBACK
 # =========================================================
 
 async def check_join_callback(
@@ -630,7 +661,6 @@ async def check_join_callback(
     if not query:
         return
 
-    # Answer callback once.
     try:
         await query.answer()
     except BadRequest:
@@ -659,6 +689,7 @@ async def check_join_callback(
                     "and press Check Membership again."
                 ),
             )
+
         except TelegramError:
             logger.exception(
                 "Could not send membership reminder"
@@ -698,9 +729,12 @@ async def check_join_callback(
 # EXPIRED CONTENT CLEANUP
 # =========================================================
 
-async def expiry_cleanup_job(context):
+async def expiry_cleanup_job(
+    context: ContextTypes.DEFAULT_TYPE,
+):
     try:
         database.deactivate_expired_links()
+
     except Exception:
         logger.exception(
             "Expired link cleanup failed"
@@ -745,7 +779,23 @@ def main():
         .build()
     )
 
+    # -----------------------------------------------------
+    # Callback diagnostic handler
+    # Group -1 logs callbacks before regular handlers.
+    # -----------------------------------------------------
+
+    application.add_handler(
+        TypeHandler(
+            Update,
+            log_callback_updates,
+        ),
+        group=-1,
+    )
+
+    # -----------------------------------------------------
     # User commands
+    # -----------------------------------------------------
+
     application.add_handler(
         CommandHandler(
             "start",
@@ -753,7 +803,10 @@ def main():
         )
     )
 
+    # -----------------------------------------------------
     # Force-join membership callbacks
+    # -----------------------------------------------------
+
     application.add_handler(
         CallbackQueryHandler(
             check_join_callback,
@@ -762,12 +815,18 @@ def main():
         group=0,
     )
 
+    # -----------------------------------------------------
     # Admin panel handlers
+    # -----------------------------------------------------
+
     admin.register_admin_handlers(
         application
     )
 
+    # -----------------------------------------------------
     # Periodic expiry cleanup
+    # -----------------------------------------------------
+
     if application.job_queue:
         application.job_queue.run_repeating(
             expiry_cleanup_job,
@@ -775,21 +834,26 @@ def main():
             first=10,
             name="expiry_cleanup",
         )
+
     else:
         logger.error(
             "JobQueue unavailable. Install "
             "python-telegram-bot[job-queue]."
         )
 
+    # -----------------------------------------------------
+    # Error handler
+    # -----------------------------------------------------
+
     application.add_error_handler(
         error_handler
     )
 
-    logger.info(
-        "Store Bot starting..."
-    )
+    logger.info("Store Bot starting...")
 
-    application.run_polling()
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
 
 
 if __name__ == "__main__":
