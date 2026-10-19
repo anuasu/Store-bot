@@ -1238,9 +1238,10 @@ async def admin_callbacks(
     data = query.data or ""
 
     logger.info(
-        "ADMIN CALLBACK user_id=%s data=%s",
+        "ADMIN CALLBACK RECEIVED | user_id=%s | data=%r | chat_id=%s",
         user_id,
         data,
+        query.message.chat_id if query.message else None,
     )
 
     if not is_admin(user_id):
@@ -1640,11 +1641,15 @@ def register_admin_handlers(application):
         )
     )
 
+    # Keep admin callbacks in group 0. The handler pattern matches every
+    # callback emitted by the admin keyboards (admin_* and add_type_*).
+    # Force-join callbacks use a separate check_join: pattern in bot.py.
     application.add_handler(
         CallbackQueryHandler(
             admin_callbacks,
-            pattern=r"^(admin_|add_type_)",
-        )
+            pattern=r"^(?:admin_[A-Za-z0-9_]+|add_type_[A-Za-z0-9_]+)$",
+        ),
+        group=0,
     )
 
     application.add_handler(
