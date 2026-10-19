@@ -335,7 +335,15 @@ async def admin_command(
     user = update.effective_user
     message = update.effective_message
 
-    if not user or not is_admin(user.id):
+    if (
+        not user
+        or not message
+        or not update.effective_chat
+        or update.effective_chat.type != "private"
+    ):
+        return
+
+    if not is_admin(user.id):
         if message:
             await message.reply_text(
                 "⛔ You are not authorized to use this command."
@@ -1242,6 +1250,10 @@ async def admin_callbacks(
     if not query:
         return
 
+    # Admin panel callbacks are private-chat only; stay silent in groups.
+    if not update.effective_chat or update.effective_chat.type != "private":
+        return
+
     user_id = query.from_user.id
     data = query.data or ""
 
@@ -1503,6 +1515,8 @@ async def handle_admin_message(
     if (
         not message
         or not user
+        or not update.effective_chat
+        or update.effective_chat.type != "private"
         or not is_admin(user.id)
     ):
         return
@@ -1644,6 +1658,7 @@ def register_admin_handlers(application):
         CommandHandler(
             "admin",
             admin_command,
+            filters=filters.ChatType.PRIVATE,
         )
     )
 
@@ -1651,6 +1666,7 @@ def register_admin_handlers(application):
         CommandHandler(
             "cancel",
             cancel_admin_action,
+            filters=filters.ChatType.PRIVATE,
         )
     )
 
@@ -1667,7 +1683,7 @@ def register_admin_handlers(application):
 
     application.add_handler(
         MessageHandler(
-            filters.ALL & ~filters.COMMAND,
+            filters.ChatType.PRIVATE & filters.ALL & ~filters.COMMAND,
             handle_admin_message,
         ),
         group=1,
