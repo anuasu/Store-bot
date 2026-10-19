@@ -233,6 +233,12 @@ def timer_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
+                "❌ OFF",
+                callback_data="admin_timer_set_0",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
                 f"{minutes} min",
                 callback_data=f"admin_timer_set_{minutes}",
             )
@@ -758,11 +764,13 @@ def remove_store_link(value):
 # =========================================================
 
 async def show_timer(query):
+    current = get_timer_value()
+    label = "OFF (no automatic expiry)" if current == 0 else f"{current} minutes"
     await safe_edit(
         query,
         "⏱️ CONTENT EXPIRY TIMER\n\n"
-        f"Current expiry: {get_timer_value()} minutes\n\n"
-        "New content uses this timer. "
+        f"Current expiry: {label}\n\n"
+        "OFF = new Store Links do not expire automatically.\n"
         "Existing links keep their original expiry.",
         timer_keyboard(),
     )
@@ -1362,7 +1370,7 @@ async def admin_callbacks(
                 data.rsplit("_", 1)[1]
             )
 
-            if minutes not in [5, 10, 15, 30, 60]:
+            if minutes not in [0, 5, 10, 15, 30, 60]:
                 await safe_edit(
                     query,
                     "❌ Invalid timer.",
@@ -1376,9 +1384,14 @@ async def admin_callbacks(
 
             await safe_edit(
                 query,
-                f"✅ Content expiry timer set to "
-                f"{minutes} minutes.\n"
-                "Existing links keep their original expiry.",
+                (
+                    "✅ Content expiry timer is OFF.\n"
+                    "New Store Links will not expire automatically.\n"
+                    "Existing links keep their original expiry."
+                    if minutes == 0
+                    else f"✅ Content expiry timer set to {minutes} minutes.\n"
+                         "Existing links keep their original expiry."
+                ),
                 timer_keyboard(),
             )
 
