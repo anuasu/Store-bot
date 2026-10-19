@@ -8,6 +8,9 @@ from zoneinfo import ZoneInfo
 
 BOT_TOKEN = "8497361955:AAHYpc9YfGHomaw1_H-AqzwyHwTHdrDzl0w"
 
+# @ ke bina apne bot ka username likhna
+BOT_USERNAME = "SecretsWorkBot"
+
 
 # ==================================================
 # ADMIN CONFIGURATION
@@ -33,12 +36,8 @@ DATABASE_FILE = os.path.join(DATA_DIR, "store.db")
 # CONTENT EXPIRY CONFIGURATION
 # ==================================================
 
-# Default expiry for newly created Store Links.
-# Admin Panel can override this setting.
-
 CONTENT_TTL_MINUTES = 30
 
-# Available timer presets in Admin Panel.
 AVAILABLE_TIMER_MINUTES = [5, 10, 15, 30, 60]
 
 
@@ -46,17 +45,12 @@ AVAILABLE_TIMER_MINUTES = [5, 10, 15, 30, 60]
 # CONTENT PROTECTION CONFIGURATION
 # ==================================================
 
-# Default protection for Telegram-supported content.
-# Admin Panel can turn protection ON or OFF.
-
 CONTENT_PROTECTION_ENABLED = True
 
 
 # ==================================================
 # FORCE JOIN CONFIGURATION
 # ==================================================
-
-# Maximum 6 channels/groups supported.
 
 FORCE_JOIN_CHANNELS = [
     {
@@ -95,7 +89,7 @@ BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 
 AUTO_BACKUP_ENABLED = True
 
-# Daily backup at midnight.
+# Daily automatic backup at midnight
 AUTO_BACKUP_HOUR = 0
 AUTO_BACKUP_MINUTE = 0
 
@@ -120,12 +114,17 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 # CONFIGURATION VALIDATION
 # ==================================================
 
-if not BOT_TOKEN or BOT_TOKEN in (
-    "PASTE_YOUR_BOT_TOKEN_HERE",
-    "hide",
+if (
+    not BOT_TOKEN
+    or BOT_TOKEN == "PASTE_YOUR_NEW_BOT_TOKEN_HERE"
 ):
     raise ValueError(
         "Please configure your real BOT_TOKEN in config.py"
+    )
+
+if not BOT_USERNAME or BOT_USERNAME == "YourBotUsername":
+    raise ValueError(
+        "Please configure BOT_USERNAME without @"
     )
 
 if not ADMIN_IDS:
@@ -143,9 +142,12 @@ if not AVAILABLE_TIMER_MINUTES:
         "AVAILABLE_TIMER_MINUTES cannot be empty"
     )
 
-if any(minutes < 1 for minutes in AVAILABLE_TIMER_MINUTES):
+if any(
+    not isinstance(minutes, int) or minutes < 1
+    for minutes in AVAILABLE_TIMER_MINUTES
+):
     raise ValueError(
-        "All timer values must be at least 1 minute"
+        "All timer values must be positive integers"
     )
 
 if len(FORCE_JOIN_CHANNELS) > 6:
