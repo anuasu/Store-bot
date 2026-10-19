@@ -17,6 +17,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     TypeHandler,
     ContextTypes,
+    filters,
 )
 
 import config
@@ -570,7 +571,12 @@ async def start_command(
     message = update.effective_message
     user = update.effective_user
 
-    if not message or not user:
+    if (
+        not message
+        or not user
+        or not update.effective_chat
+        or update.effective_chat.type != "private"
+    ):
         return
 
     database.add_user(user.id)
@@ -632,6 +638,10 @@ async def check_join_callback(
     query = update.callback_query
 
     if not query:
+        return
+
+    # Force-join checks are handled only in private chats.
+    if not update.effective_chat or update.effective_chat.type != "private":
         return
 
     # Answer callback once.
@@ -769,6 +779,7 @@ def main():
         CommandHandler(
             "start",
             start_command,
+            filters=filters.ChatType.PRIVATE,
         )
     )
 
