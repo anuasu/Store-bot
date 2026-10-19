@@ -1,5 +1,3 @@
-# admin.py
-
 import os
 import re
 import sqlite3
@@ -22,14 +20,14 @@ from telegram.ext import (
     filters,
 )
 
+import config
+import database
+
 from config import (
     ADMIN_IDS,
     DATABASE_FILE,
     BACKUP_DIR,
     BOT_TIMEZONE,
-    AUTO_BACKUP_ENABLED,
-    AUTO_BACKUP_HOUR,
-    AUTO_BACKUP_MINUTE,
     AVAILABLE_TIMER_MINUTES,
 )
 
@@ -42,11 +40,22 @@ from database import (
     get_content_protection,
     set_content_protection,
     deactivate_link,
+    get_setting,
+    set_setting,
 )
 
 logger = logging.getLogger(__name__)
 
 ADMIN_IDS = set(ADMIN_IDS)
+
+AUTO_BACKUP_HOUR = 0
+AUTO_BACKUP_MINUTE = 0
+
+# Auto backup is permanently enabled in this code.
+AUTO_BACKUP_ENABLED = True
+
+# Auto-delete choices are separate from Store Link expiry.
+AUTO_DELETE_OPTIONS = [0, 5, 10, 15, 30]
 
 CONTENT_TYPES = {
     "link": "🔗 Link",
@@ -106,6 +115,12 @@ def admin_keyboard():
                 "⏱️ Timer Settings",
                 callback_data="admin_timer",
             ),
+            InlineKeyboardButton(
+                "🗑️ Auto-Delete",
+                callback_data="admin_auto_delete",
+            ),
+        ],
+        [
             InlineKeyboardButton(
                 "🛡️ Content Protection",
                 callback_data="admin_protection",
@@ -171,6 +186,42 @@ def add_keyboard():
     ])
 
 
+def back_keyboard(callback="admin_home"):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⬅️ Back",
+                callback_data=callback,
+            )
+        ]
+    ])
+
+
+def get_auto_delete_minutes():
+    try:
+        value = int(
+            get_setting("auto_delete_minutes") or "0"
+        )
+
+        if value not in AUTO_DELETE_OPTIONS:
+            return 0
+
+        return value
+
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_auto_delete_minutes(minutes):
+    if minutes not in AUTO_DELETE_OPTIONS:
+        raise ValueError("Invalid auto-delete timer.")
+
+    set_setting(
+        "auto_delete_minutes",
+        str(minutes),
+    )
+
+
 async def show_admin_home(query):
     await query.edit_message_text(
         "🛠️ STORE BOT ADMIN PANEL\n\n"
@@ -202,7 +253,7 @@ def valid_url(value):
 
 
 # ==========================================================
-# DATABASE LINK HELPERS
+# LINK MANAGEMENT
 # ==========================================================
 
 def get_removable_links(limit=30):
@@ -225,10 +276,6 @@ def get_removable_links(limit=30):
 
         return [dict(row) for row in rows]
 
-
-# ==========================================================
-# CREATE CONTENT
-# ==========================================================
 
 def create_content_store_link(
     content_type,
@@ -278,39 +325,41 @@ async def send_link_results(
 
     bot_info = await context.bot.get_me()
 
-    lines = [
+    # Keep each result message below Telegram's text limit.
+    header = [
         "✅ STORE LINK RESULTS",
         "",
-        f"Created: {len(created)}",
-        f"Failed: {len(failed)}",
+        f"📤 Sent: {len(created) + len(failed)} Items",
+        f"✅ Created: {len(created)}",
+        f"❌ Failed: {len(failed)}",
         "",
     ]
 
-    for number, (label, code) in enumerate(
-        created,
-        start=1,
-    ):
+    lines = []
+
+    for label, code in created:
         url = (
             f"https://t.me/{bot_info.username}"
             f"?start={code}"
         )
 
-        lines.extend([
-            f"{number}. {label}",
-            url,
-            "",
-        ])
+        lines.append(f"{label}\n{url}")
 
     if failed:
         lines.extend([
-            "❌ Failed URLs:",
+            "",
+            "❌ Failed items:",
             *failed[:10],
         ])
 
-    # Send results in safe-sized chunks.
+    text = "\n".join(header + lines)
+
+    # Split safely if a very large bulk operation produces
+    # more text than Telegram allows in a single message.
+    chunks = []
     current = ""
 
-    for line in lines:
+    for line in text.splitlines():
         candidate = (
             current + "\n" + line
             if current
@@ -319,14 +368,17 @@ async def send_link_results(
 
         if len(candidate) > 3800:
             if current:
-                await message.reply_text(current)
+                chunks.append(current)
 
             current = line
         else:
             current = candidate
 
     if current:
-        await message.reply_text(current)
+        chunks.append(current)
+
+    for chunk in chunks:
+        await message.reply_text(chunk)
 
 
 # ==========================================================
@@ -374,7 +426,6 @@ async def create_media_item(
         )
         return
 
-    # Check selected Add mode.
     expected_types = {
         "video": {"video"},
         "photo": {"photo"},
@@ -391,7 +442,6 @@ async def create_media_item(
             )
             return
 
-    # Convert admin labels to database types.
     database_type = {
         "file": "document",
         "gif": "animation",
@@ -466,22 +516,15 @@ async def admin_callbacks(update, context):
         return
 
     await query.answer()
-
     action = query.data or ""
 
-    # ------------------------------------------------------
     # HOME
-    # ------------------------------------------------------
-
     if action == "admin_home":
         context.user_data.pop("admin_action", None)
         await show_admin_home(query)
         return
 
-    # ------------------------------------------------------
     # ADD MENU
-    # ------------------------------------------------------
-
     if action == "admin_add":
         context.user_data.pop("admin_action", None)
 
@@ -493,10 +536,7 @@ async def admin_callbacks(update, context):
         )
         return
 
-    # ------------------------------------------------------
     # ADD TYPE
-    # ------------------------------------------------------
-
     if action.startswith("add_type_"):
         selected = action.replace(
             "add_type_",
@@ -528,11 +568,11 @@ async def admin_callbacks(update, context):
             "gif": "Send a GIF/animation.",
             "text": "Send the text to store.",
             "bulk": (
-                "Send supported content one item at a time "
-                "or as Telegram albums.\n\n"
-                "Supported: URLs, text, videos, photos, "
-                "files, audio, voice, GIFs and stickers.\n\n"
-                "Each item receives its own Store Link."
+                "Send supported content.\n\n"
+                "Each media message creates its own Store Link.\n"
+                "You can also send multiple HTTP/HTTPS URLs "
+                "in one message, one URL per line.\n\n"
+                "Send /cancel to cancel."
             ),
         }
 
@@ -543,10 +583,7 @@ async def admin_callbacks(update, context):
         )
         return
 
-    # ------------------------------------------------------
     # STATISTICS
-    # ------------------------------------------------------
-
     if action == "admin_stats":
         stats = get_statistics()
 
@@ -574,10 +611,7 @@ async def admin_callbacks(update, context):
         )
         return
 
-    # ------------------------------------------------------
     # BROADCAST
-    # ------------------------------------------------------
-
     if action == "admin_broadcast":
         context.user_data["admin_action"] = "broadcast"
 
@@ -588,11 +622,10 @@ async def admin_callbacks(update, context):
         )
         return
 
-    # ------------------------------------------------------
     # BACKUP MENU
-    # ------------------------------------------------------
-
     if action == "admin_backup":
+        context.user_data.pop("admin_action", None)
+
         await query.edit_message_text(
             "💾 BACKUP MANAGEMENT\n\n"
             "Choose an option:",
@@ -627,46 +660,30 @@ async def admin_callbacks(update, context):
         context.user_data["admin_action"] = "restore"
 
         await query.edit_message_text(
-            "📤 RESTORE BACKUP\n\n"
-            "Restore is not enabled in this version.\n"
-            "No database changes will be made.\n\n"
-            "Send /cancel to exit."
+            "📤 RESTORE DATABASE BACKUP\n\n"
+            "Send the SQLite .db backup file as a document.\n"
+            "The current database will be backed up first.\n"
+            "Then the uploaded database will replace it.\n\n"
+            "⚠️ Restore changes the current database.\n"
+            "Only restore a backup you trust.\n\n"
+            "Send /cancel to cancel."
         )
         return
 
-    # ------------------------------------------------------
-    # AUTO BACKUP
-    # ------------------------------------------------------
-
+    # AUTO BACKUP - ALWAYS ON
     if action == "admin_auto_backup":
-        status = (
-            "Enabled"
-            if AUTO_BACKUP_ENABLED
-            else "Disabled"
-        )
-
         await query.edit_message_text(
-            "🔄 AUTO BACKUP\n\n"
-            f"Status: {status}\n"
-            f"Schedule: Daily at "
-            f"{AUTO_BACKUP_HOUR:02d}:"
-            f"{AUTO_BACKUP_MINUTE:02d}\n"
-            f"Timezone: {BOT_TIMEZONE}",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Back",
-                        callback_data="admin_home",
-                    )
-                ],
-            ]),
+            "🔄 AUTOMATIC BACKUP\n\n"
+            "Status: ALWAYS ON 🟢\n"
+            "Schedule: Every day at 12:00 AM\n"
+            "Timezone: Asia/Kolkata\n\n"
+            "Automatic backup cannot be disabled from "
+            "this panel.",
+            reply_markup=back_keyboard(),
         )
         return
 
-    # ------------------------------------------------------
     # REMOVE LINK
-    # ------------------------------------------------------
-
     if action == "admin_remove_link":
         links = get_removable_links()
 
@@ -674,14 +691,7 @@ async def admin_callbacks(update, context):
             await query.edit_message_text(
                 "➖ REMOVE LINK\n\n"
                 "No active Store Links found.",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ Back",
-                            callback_data="admin_home",
-                        )
-                    ]
-                ]),
+                reply_markup=back_keyboard(),
             )
             return
 
@@ -739,10 +749,7 @@ async def admin_callbacks(update, context):
         )
         return
 
-    # ------------------------------------------------------
-    # TIMER SETTINGS
-    # ------------------------------------------------------
-
+    # CONTENT EXPIRY TIMER
     if action == "admin_timer":
         current = get_content_ttl_minutes()
 
@@ -785,9 +792,10 @@ async def admin_callbacks(update, context):
         ])
 
         await query.edit_message_text(
-            "⏱️ TIMER SETTINGS\n\n"
+            "⏱️ CONTENT EXPIRY TIMER\n\n"
             f"Current timer: {current} minutes\n\n"
-            "The timer applies to newly created links.",
+            "This controls how long newly created Store Links "
+            "remain valid. Existing links keep their expiry.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -815,7 +823,7 @@ async def admin_callbacks(update, context):
 
         await query.edit_message_text(
             "✅ TIMER UPDATED\n\n"
-            f"New links expire after {minutes} minutes.",
+            f"New Store Links expire after {minutes} minutes.",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -837,17 +845,100 @@ async def admin_callbacks(update, context):
         context.user_data["admin_action"] = "custom_timer"
 
         await query.edit_message_text(
-            "✏️ CUSTOM TIMER\n\n"
+            "✏️ CUSTOM EXPIRY TIMER\n\n"
             "Send expiry time in minutes.\n"
             "Allowed range: 1–10080 minutes.\n\n"
             "Send /cancel to cancel."
         )
         return
 
-    # ------------------------------------------------------
-    # CONTENT PROTECTION
-    # ------------------------------------------------------
+    # AUTO-DELETE TIMER
+    if action == "admin_auto_delete":
+        current = get_auto_delete_minutes()
+        keyboard = []
 
+        for minutes in AUTO_DELETE_OPTIONS:
+            label = (
+                "OFF"
+                if minutes == 0
+                else f"{minutes} Minutes"
+            )
+
+            if minutes == current:
+                label += " ✓"
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"admin_autodel_set_{minutes}",
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(
+                "⬅️ Back",
+                callback_data="admin_home",
+            )
+        ])
+
+        await query.edit_message_text(
+            "🗑️ AUTO-DELETE TIMER\n\n"
+            f"Current setting: "
+            f"{'OFF' if current == 0 else str(current) + ' minutes'}\n\n"
+            "This setting is saved in the database.\n"
+            "The delivery handler in bot.py must use this "
+            "setting to schedule message deletion.\n\n"
+            "Telegram can delete bot messages, but cannot "
+            "delete content already downloaded or copied.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if action.startswith("admin_autodel_set_"):
+        try:
+            minutes = int(
+                action[len("admin_autodel_set_"):]
+            )
+        except ValueError:
+            await query.edit_message_text(
+                "Invalid timer option.",
+                reply_markup=admin_keyboard(),
+            )
+            return
+
+        if minutes not in AUTO_DELETE_OPTIONS:
+            await query.edit_message_text(
+                "Invalid timer option.",
+                reply_markup=admin_keyboard(),
+            )
+            return
+
+        set_auto_delete_minutes(minutes)
+
+        await query.edit_message_text(
+            "✅ AUTO-DELETE SETTING SAVED\n\n"
+            f"Selected: "
+            f"{'OFF' if minutes == 0 else str(minutes) + ' minutes'}\n\n"
+            "The bot.py delivery handler must be updated "
+            "to apply this timer to sent messages.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🗑️ Auto-Delete Settings",
+                        callback_data="admin_auto_delete",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ],
+            ]),
+        )
+        return
+
+    # CONTENT PROTECTION
     if action == "admin_protection":
         enabled = get_content_protection()
 
@@ -883,14 +974,7 @@ async def admin_callbacks(update, context):
 
         await query.edit_message_text(
             "🛡️ Content Protection enabled.",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Back",
-                        callback_data="admin_protection",
-                    )
-                ]
-            ]),
+            reply_markup=back_keyboard("admin_protection"),
         )
         return
 
@@ -899,19 +983,12 @@ async def admin_callbacks(update, context):
 
         await query.edit_message_text(
             "🛡️ Content Protection disabled.",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Back",
-                        callback_data="admin_protection",
-                    )
-                ]
-            ]),
+            reply_markup=back_keyboard("admin_protection"),
         )
 
 
 # ==========================================================
-# BACKUP
+# DATABASE BACKUP
 # ==========================================================
 
 async def create_backup(backup_type="manual"):
@@ -943,6 +1020,17 @@ async def create_backup(backup_type="manual"):
         destination.close()
         source.close()
 
+    # Verify the backup is a valid SQLite database.
+    with sqlite3.connect(path) as check_conn:
+        result = check_conn.execute(
+            "PRAGMA integrity_check"
+        ).fetchone()
+
+        if not result or result[0] != "ok":
+            raise sqlite3.DatabaseError(
+                "Backup integrity check failed."
+            )
+
     record_backup(filename, backup_type)
 
     return path
@@ -968,10 +1056,13 @@ async def create_manual_backup(query, context):
     except Exception:
         logger.exception("Backup creation failed.")
 
-        await query.edit_message_text(
-            "❌ Backup failed. Check the bot logs.",
-            reply_markup=admin_keyboard(),
-        )
+        try:
+            await query.edit_message_text(
+                "❌ Backup failed. Check the bot logs.",
+                reply_markup=admin_keyboard(),
+            )
+        except TelegramError:
+            pass
 
 
 async def auto_backup_job(context):
@@ -979,14 +1070,197 @@ async def auto_backup_job(context):
         path = await create_backup("automatic")
 
         logger.info(
-            "Automatic backup created: %s",
+            "Automatic database backup created: %s",
             path,
         )
+
+        # Attempt to send a copy to each configured admin.
+        # The local backup remains available if Telegram delivery fails.
+        for admin_id in ADMIN_IDS:
+            try:
+                with open(path, "rb") as file:
+                    await context.bot.send_document(
+                        chat_id=admin_id,
+                        document=file,
+                        filename=os.path.basename(path),
+                        caption=(
+                            "🔄 Daily automatic database backup "
+                            "(12:00 AM Asia/Kolkata)."
+                        ),
+                    )
+            except TelegramError:
+                logger.warning(
+                    "Could not deliver automatic backup to admin %s. "
+                    "The local backup was retained.",
+                    admin_id,
+                )
 
     except Exception:
         logger.exception(
             "Automatic backup failed."
         )
+
+
+# ==========================================================
+# RESTORE DATABASE BACKUP
+# ==========================================================
+
+def validate_sqlite_backup(path):
+    if not os.path.isfile(path):
+        return False
+
+    try:
+        with sqlite3.connect(path) as conn:
+            result = conn.execute(
+                "PRAGMA integrity_check"
+            ).fetchone()
+
+            if not result or result[0] != "ok":
+                return False
+
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    """
+                ).fetchall()
+            }
+
+            required = {
+                "users",
+                "content",
+                "store_links",
+                "settings",
+            }
+
+            return required.issubset(tables)
+
+    except sqlite3.DatabaseError:
+        return False
+
+
+async def restore_database_from_upload(
+    update,
+    context,
+    message,
+):
+    document = message.document
+
+    if not document:
+        await message.reply_text(
+            "❌ Send a SQLite .db backup as a document."
+        )
+        return
+
+    filename = document.file_name or ""
+
+    if not filename.lower().endswith(".db"):
+        await message.reply_text(
+            "❌ Backup filename must end with .db."
+        )
+        return
+
+    # Limit uploads to 100 MB.
+    if document.file_size and document.file_size > 100 * 1024 * 1024:
+        await message.reply_text(
+            "❌ Backup is too large. Maximum size is 100 MB."
+        )
+        return
+
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+
+    timestamp = datetime.now(
+        BOT_TIMEZONE
+    ).strftime("%Y%m%d_%H%M%S")
+
+    temp_path = os.path.join(
+        BACKUP_DIR,
+        f"restore_upload_{timestamp}.db",
+    )
+
+    safety_path = None
+
+    status = await message.reply_text(
+        "⏳ Downloading and validating the backup..."
+    )
+
+    try:
+        telegram_file = await context.bot.get_file(
+            document.file_id
+        )
+
+        await telegram_file.download_to_drive(
+            custom_path=temp_path
+        )
+
+        if not validate_sqlite_backup(temp_path):
+            await status.edit_text(
+                "❌ This is not a valid Store Bot database backup.\n"
+                "The current database was not changed."
+            )
+            return
+
+        # First create a safety backup of the current database.
+        safety_path = await create_backup(
+            "before_restore"
+        )
+
+        # SQLite backup API avoids a raw file copy while the
+        # database may be open elsewhere in the process.
+        with sqlite3.connect(
+            temp_path,
+            timeout=30,
+        ) as source, sqlite3.connect(
+            DATABASE_FILE,
+            timeout=30,
+        ) as destination:
+            source.backup(destination)
+
+            check = destination.execute(
+                "PRAGMA integrity_check"
+            ).fetchone()
+
+            if not check or check[0] != "ok":
+                raise sqlite3.DatabaseError(
+                    "Restored database failed integrity check."
+                )
+
+        await status.edit_text(
+            "✅ DATABASE RESTORED\n\n"
+            "The uploaded backup was validated and restored.\n"
+            f"Safety backup: {os.path.basename(safety_path)}\n\n"
+            "Restart the bot if any database-related error occurs."
+        )
+
+        logger.warning(
+            "Database restored by admin %s from %s",
+            update.effective_user.id,
+            filename,
+        )
+
+    except Exception:
+        logger.exception("Database restore failed.")
+
+        try:
+            await status.edit_text(
+                "❌ Restore failed.\n"
+                "Check the bot logs and the safety backup."
+            )
+        except TelegramError:
+            pass
+
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            logger.warning(
+                "Could not remove temporary restore file: %s",
+                temp_path,
+            )
 
 
 # ==========================================================
@@ -1005,10 +1279,7 @@ async def handle_admin_message(update, context):
     if not action:
         return
 
-    # ------------------------------------------------------
     # BROADCAST
-    # ------------------------------------------------------
-
     if action == "broadcast":
         context.user_data.pop("admin_action", None)
 
@@ -1026,13 +1297,11 @@ async def handle_admin_message(update, context):
                     from_chat_id=message.chat_id,
                     message_id=message.message_id,
                 )
-
                 sent += 1
 
             except TelegramError:
                 failed += 1
 
-            # Avoid hammering Telegram's API.
             await asyncio.sleep(0.04)
 
         await status.edit_text(
@@ -1042,10 +1311,7 @@ async def handle_admin_message(update, context):
         )
         return
 
-    # ------------------------------------------------------
-    # CUSTOM TIMER
-    # ------------------------------------------------------
-
+    # CUSTOM CONTENT EXPIRY TIMER
     if action == "custom_timer":
         if not message.text:
             await message.reply_text(
@@ -1068,37 +1334,31 @@ async def handle_admin_message(update, context):
             return
 
         set_content_ttl_minutes(minutes)
-
         context.user_data.pop("admin_action", None)
 
         await message.reply_text(
-            f"✅ Timer updated to {minutes} minutes.",
+            f"✅ Store Link expiry updated to {minutes} minutes.",
             reply_markup=admin_keyboard(),
         )
         return
 
-    # ------------------------------------------------------
-    # RESTORE PLACEHOLDER
-    # ------------------------------------------------------
-
+    # RESTORE DATABASE
     if action == "restore":
-        await message.reply_text(
-            "⚠️ Restore is not enabled in this version.\n\n"
-            "No database changes were made."
+        await restore_database_from_upload(
+            update,
+            context,
+            message,
         )
-        return
 
-    # ------------------------------------------------------
-    # ADD MODES
-    # ------------------------------------------------------
+        context.user_data.pop("admin_action", None)
+        return
 
     if not action.startswith("add_"):
         return
 
     selected_type = action[4:]
 
-    # -------------------- ADD LINK ------------------------
-
+    # ADD LINK: only this mode accepts URL Store Links.
     if selected_type == "link":
         if not message.text:
             await message.reply_text(
@@ -1133,8 +1393,7 @@ async def handle_admin_message(update, context):
         )
         return
 
-    # -------------------- ADD TEXT ------------------------
-
+    # ADD TEXT
     if selected_type == "text":
         if not message.text:
             await message.reply_text(
@@ -1151,7 +1410,7 @@ async def handle_admin_message(update, context):
             await send_link_results(
                 message,
                 context,
-                [("Text", code)],
+                [("📝 Text", code)],
             )
 
         except Exception:
@@ -1165,8 +1424,7 @@ async def handle_admin_message(update, context):
 
         return
 
-    # -------------------- BULK TEXT -----------------------
-
+    # BULK URL OR TEXT
     if selected_type == "bulk" and message.text:
         lines = [
             line.strip()
@@ -1180,8 +1438,7 @@ async def handle_admin_message(update, context):
             )
             return
 
-        # If every line is a URL, create a separate
-        # URL Store Link for every URL.
+        # A list of URLs creates one Store Link per URL.
         if all(valid_url(line) for line in lines):
             created, failed = await create_url_store_links(
                 lines
@@ -1195,7 +1452,7 @@ async def handle_admin_message(update, context):
             )
             return
 
-        # Otherwise, the complete text message gets one link.
+        # Otherwise, store the complete text as one item.
         try:
             code = create_content_store_link(
                 "text",
@@ -1205,7 +1462,7 @@ async def handle_admin_message(update, context):
             await send_link_results(
                 message,
                 context,
-                [("Text", code)],
+                [("📝 Text", code)],
             )
 
         except Exception:
@@ -1219,8 +1476,7 @@ async def handle_admin_message(update, context):
 
         return
 
-    # -------------------- MEDIA MODES ---------------------
-
+    # MEDIA MODES
     if selected_type in {
         "video",
         "photo",
@@ -1290,8 +1546,8 @@ def register_admin_handlers(application):
         )
     )
 
-    # This handler is the only admin content creator.
-    # bot.py must not independently process admin uploads.
+    # Admin actions are handled here only.
+    # bot.py must not independently create admin upload links.
     application.add_handler(
         MessageHandler(
             filters.ALL & ~filters.COMMAND,
@@ -1300,12 +1556,12 @@ def register_admin_handlers(application):
         group=1,
     )
 
-    # Daily automatic backup.
-    if AUTO_BACKUP_ENABLED and application.job_queue:
+    # Daily automatic backup, permanently enabled.
+    if application.job_queue:
         application.job_queue.run_daily(
             auto_backup_job,
             time=datetime.strptime(
-                f"{AUTO_BACKUP_HOUR}:{AUTO_BACKUP_MINUTE}",
+                "00:00",
                 "%H:%M",
             ).time().replace(
                 tzinfo=BOT_TIMEZONE
@@ -1313,8 +1569,13 @@ def register_admin_handlers(application):
             name="daily_auto_backup",
         )
 
-    elif AUTO_BACKUP_ENABLED:
-        logger.warning(
-            "Automatic backup is enabled in config, but "
-            "JobQueue is unavailable."
+        logger.info(
+            "Daily automatic backup scheduled for midnight Asia/Kolkata."
+        )
+
+    else:
+        logger.error(
+            "Automatic backup could not be scheduled because JobQueue "
+            "is unavailable. Install python-telegram-bot with the "
+            "job-queue extra and restart the bot."
         )
