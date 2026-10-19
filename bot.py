@@ -2,7 +2,6 @@ import logging
 import secrets
 import sqlite3
 import asyncio
-
 from datetime import datetime, timedelta, timezone
 
 from telegram import (
@@ -25,7 +24,7 @@ import admin
 
 
 # =========================================================
-# LOGGING & CONFIG
+# LOGGING
 # =========================================================
 
 logging.basicConfig(
@@ -41,7 +40,7 @@ FORCE_JOIN_CHANNELS = config.FORCE_JOIN_CHANNELS
 
 
 # =========================================================
-# DATE & TIME HELPERS
+# DATE HELPERS
 # =========================================================
 
 def utc_now():
@@ -77,7 +76,9 @@ def get_expiry_time(minutes=None):
     if minutes < 1:
         raise ValueError("Expiry must be at least one minute.")
 
-    return (utc_now() + timedelta(minutes=minutes)).isoformat()
+    return (
+        utc_now() + timedelta(minutes=minutes)
+    ).isoformat()
 
 
 # =========================================================
@@ -90,20 +91,16 @@ def create_store_link(
     file_id=None,
     caption=None,
 ):
-    """
-    Create a content item and its unique Store Link.
-
-    Returns:
-        Telegram deep link URL as a string.
-    """
-
     aliases = {
         "link": "url",
         "file": "document",
         "gif": "animation",
     }
 
-    content_type = aliases.get(content_type, content_type)
+    content_type = aliases.get(
+        content_type,
+        content_type,
+    )
 
     allowed_types = {
         "text",
@@ -119,41 +116,60 @@ def create_store_link(
     }
 
     if content_type not in allowed_types:
-        raise ValueError("Unsupported content type.")
+        raise ValueError(
+            f"Unsupported content type: {content_type}"
+        )
 
     if content_type == "url":
         if not isinstance(content_data, str):
             raise ValueError("URL must be a string.")
 
-        url = content_data.strip()
+        content_data = content_data.strip()
 
-        if not url.startswith(("https://", "http://")):
-            raise ValueError("Only HTTP/HTTPS URLs are supported.")
-
-        content_data = url
+        if not content_data.startswith(
+            ("https://", "http://")
+        ):
+            raise ValueError(
+                "Only HTTP/HTTPS URLs are supported."
+            )
 
     elif content_type == "text":
-        if not isinstance(content_data, str) or not content_data.strip():
-            raise ValueError("Text content cannot be empty.")
+        if (
+            not isinstance(content_data, str)
+            or not content_data.strip()
+        ):
+            raise ValueError("Text cannot be empty.")
 
     else:
         if not file_id:
-            raise ValueError("A valid Telegram file ID is required.")
+            raise ValueError(
+                "A valid Telegram file ID is required."
+            )
 
         content_data = file_id
 
-    link_code = secrets.token_urlsafe(9).replace("-", "").replace("_", "")
+    bot_username = (
+        config.BOT_USERNAME.strip().lstrip("@")
+    )
+
+    if not bot_username:
+        raise ValueError(
+            "BOT_USERNAME is missing from config.py"
+        )
+
+    link_code = secrets.token_urlsafe(12)
 
     expiry = get_expiry_time()
 
-    os_imported = True
-
+    # Save content and link in one database transaction.
     with sqlite3.connect(
         config.DATABASE_FILE,
         timeout=30,
     ) as connection:
 
-        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
 
         cursor = connection.cursor()
 
@@ -200,9 +216,10 @@ def create_store_link(
             ),
         )
 
-    bot_username = config.BOT_USERNAME.strip().lstrip("@")
-
-    return f"https://t.me/{bot_username}?start={link_code}"
+    return (
+        f"https://t.me/{bot_username}"
+        f"?start={link_code}"
+    )
 
 
 # =========================================================
@@ -233,7 +250,8 @@ def get_valid_item(link_code):
                 c.caption,
                 c.expires_at AS content_expires_at
             FROM store_links sl
-            JOIN content c ON c.id = sl.content_id
+            JOIN content c
+                ON c.id = sl.content_id
             WHERE sl.link_code = ?
             LIMIT 1
             """,
@@ -248,8 +266,13 @@ def get_valid_item(link_code):
     if not item["is_active"]:
         return None
 
-    link_expiry = parse_datetime(item["link_expires_at"])
-    content_expiry = parse_datetime(item["content_expires_at"])
+    link_expiry = parse_datetime(
+        item["link_expires_at"]
+    )
+
+    content_expiry = parse_datetime(
+        item["content_expires_at"]
+    )
 
     now = utc_now()
 
@@ -279,7 +302,9 @@ def force_join_keyboard(link_code=None):
             )
         ])
 
-    callback_value = link_code if link_code else "direct"
+    callback_value = (
+        link_code if link_code else "direct"
+    )
 
     buttons.append([
         InlineKeyboardButton(
@@ -307,18 +332,20 @@ async def check_membership(user_id, context):
 
             if (
                 member.status == ChatMemberStatus.RESTRICTED
-                and not getattr(member, "is_member", False)
+                and not getattr(
+                    member,
+                    "is_member",
+                    False,
+                )
             ):
                 return False
 
         except TelegramError:
             logger.exception(
-                "Membership check failed for user_id=%s channel=%s",
-                user_id,
+                "Membership check failed: channel=%s user=%s",
                 channel.get("title"),
+                user_id,
             )
-
-            # Fail closed if membership cannot be verified.
             return False
 
     return True
@@ -327,8 +354,8 @@ async def check_membership(user_id, context):
 async def show_force_join(message, link_code=None):
     await message.reply_text(
         "🔒 ACCESS REQUIRED\n\n"
-        "Please join all required channels, then press "
-        "Check Membership.",
+        "Please join all required channels, "
+        "then press Check Membership.",
         reply_markup=force_join_keyboard(link_code),
     )
 
@@ -336,29 +363,44 @@ async def show_force_join(message, link_code=None):
 async def send_login_not_confirmed(message):
     await message.reply_text(
         "❌ LOGIN NOT CONFIRMED\n\n"
-        "Open a valid Store Link to access the content."
+        "Open a valid Store Link to access content."
     )
 
 
 # =========================================================
-# CONTENT PROTECTION & AUTO-DELETE
+# CONTENT PROTECTION
 # =========================================================
 
 def content_protection_enabled():
     try:
-        return bool(database.get_content_protection())
+        return bool(
+            database.get_content_protection()
+        )
     except Exception:
-        logger.exception("Could not read content protection setting")
-        return bool(config.CONTENT_PROTECTION_ENABLED)
+        logger.exception(
+            "Could not read content protection setting"
+        )
+
+        return bool(
+            config.CONTENT_PROTECTION_ENABLED
+        )
 
 
 def get_auto_delete_minutes():
     try:
-        return int(database.get_auto_delete_minutes() or 0)
+        return int(
+            database.get_auto_delete_minutes() or 0
+        )
     except Exception:
-        logger.exception("Could not read auto-delete setting")
+        logger.exception(
+            "Could not read auto-delete setting"
+        )
         return 0
 
+
+# =========================================================
+# AUTO DELETE
+# =========================================================
 
 async def delete_messages_later(
     context,
@@ -374,13 +416,17 @@ async def delete_messages_later(
                 chat_id=chat_id,
                 message_id=message_id,
             )
+
         except TelegramError:
             logger.warning(
-                "Could not delete message_id=%s in chat_id=%s",
+                "Could not delete message %s",
                 message_id,
-                chat_id,
             )
 
+
+# =========================================================
+# SEND STORED CONTENT
+# =========================================================
 
 async def send_content(message, item, context):
     content_type = item["content_type"]
@@ -458,7 +504,6 @@ async def send_content(message, item, context):
         sent_messages.append(
             await message.reply_voice(
                 voice=file_id or content_data,
-                caption=caption,
                 protect_content=protect,
             )
         )
@@ -481,7 +526,7 @@ async def send_content(message, item, context):
 
     else:
         await message.reply_text(
-            "❌ This content type is not supported."
+            "❌ Unsupported content type."
         )
         return
 
@@ -489,12 +534,15 @@ async def send_content(message, item, context):
 
     if delete_minutes > 0 and sent_messages:
         notice = await message.reply_text(
-            f"⏳ This message will be deleted in {delete_minutes} minutes."
+            f"⏳ This message will be deleted "
+            f"in {delete_minutes} minutes."
         )
 
         message_ids = [
-            sent.message_id for sent in sent_messages
+            sent.message_id
+            for sent in sent_messages
         ]
+
         message_ids.append(notice.message_id)
 
         context.application.create_task(
@@ -525,9 +573,12 @@ async def start_command(
 
     args = context.args
 
-    # Direct /start without a Store Link.
+    # Direct /start: no content is delivered.
     if not args:
-        joined = await check_membership(user.id, context)
+        joined = await check_membership(
+            user.id,
+            context,
+        )
 
         if not joined:
             await show_force_join(message)
@@ -537,21 +588,33 @@ async def start_command(
         return
 
     link_code = args[0]
+
     item = get_valid_item(link_code)
 
     if not item:
         await message.reply_text(
-            "❌ This Store Link is invalid, expired, or unavailable."
+            "❌ This Store Link is invalid, "
+            "expired, or unavailable."
         )
         return
 
-    joined = await check_membership(user.id, context)
+    joined = await check_membership(
+        user.id,
+        context,
+    )
 
     if not joined:
-        await show_force_join(message, link_code)
+        await show_force_join(
+            message,
+            link_code,
+        )
         return
 
-    await send_content(message, item, context)
+    await send_content(
+        message,
+        item,
+        context,
+    )
 
 
 # =========================================================
@@ -567,13 +630,14 @@ async def check_join_callback(
     if not query:
         return
 
-    # Answer exactly once, after checking membership.
+    # Answer callback once.
     try:
         await query.answer()
     except BadRequest:
         pass
 
     user_id = query.from_user.id
+
     callback_data = query.data or ""
 
     link_code = callback_data.partition(":")[2]
@@ -581,52 +645,66 @@ async def check_join_callback(
     if link_code == "direct":
         link_code = None
 
-    joined = await check_membership(user_id, context)
+    joined = await check_membership(
+        user_id,
+        context,
+    )
 
     if not joined:
         try:
-            await query.answer(
-                "Please join all required channels first.",
-                show_alert=True,
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "❌ Please join all required channels "
+                    "and press Check Membership again."
+                ),
             )
-        except BadRequest:
-            pass
+        except TelegramError:
+            logger.exception(
+                "Could not send membership reminder"
+            )
 
         return
 
     if not link_code:
-        try:
-            await query.edit_message_text(
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
                 "❌ LOGIN NOT CONFIRMED\n\n"
                 "Open a valid Store Link to access content."
-            )
-        except TelegramError:
-            await query.message.reply_text(
-                "❌ LOGIN NOT CONFIRMED\n\n"
-                "Open a valid Store Link to access content."
-            )
+            ),
+        )
         return
 
     item = get_valid_item(link_code)
 
     if not item:
-        await query.message.reply_text(
-            "❌ This Store Link is invalid or expired."
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "❌ This Store Link is invalid or expired."
+            ),
         )
         return
 
-    await send_content(query.message, item, context)
+    await send_content(
+        query.message,
+        item,
+        context,
+    )
 
 
 # =========================================================
-# EXPIRED LINK CLEANUP
+# EXPIRED CONTENT CLEANUP
 # =========================================================
 
 async def expiry_cleanup_job(context):
     try:
         database.deactivate_expired_links()
     except Exception:
-        logger.exception("Expiry cleanup failed")
+        logger.exception(
+            "Expired link cleanup failed"
+        )
 
 
 # =========================================================
@@ -645,14 +723,18 @@ async def error_handler(update, context):
 # =========================================================
 
 def main():
-    if not BOT_TOKEN or BOT_TOKEN == "hide":
+    if (
+        not BOT_TOKEN
+        or BOT_TOKEN == "hide"
+        or BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE"
+    ):
         raise RuntimeError(
-            "Set your Telegram bot token privately in config.py."
+            "Set your actual bot token in config.py."
         )
 
     if len(FORCE_JOIN_CHANNELS) > 6:
         raise RuntimeError(
-            "A maximum of 6 force-join channels is supported."
+            "Maximum 6 force-join channels are supported."
         )
 
     database.init_db()
@@ -663,19 +745,29 @@ def main():
         .build()
     )
 
+    # User commands
     application.add_handler(
-        CommandHandler("start", start_command)
+        CommandHandler(
+            "start",
+            start_command,
+        )
     )
 
+    # Force-join membership callbacks
     application.add_handler(
         CallbackQueryHandler(
             check_join_callback,
             pattern=r"^check_join:",
-        )
+        ),
+        group=0,
     )
 
-    admin.register_admin_handlers(application)
+    # Admin panel handlers
+    admin.register_admin_handlers(
+        application
+    )
 
+    # Periodic expiry cleanup
     if application.job_queue:
         application.job_queue.run_repeating(
             expiry_cleanup_job,
@@ -685,12 +777,17 @@ def main():
         )
     else:
         logger.error(
-            "JobQueue unavailable; expiry cleanup is not scheduled."
+            "JobQueue unavailable. Install "
+            "python-telegram-bot[job-queue]."
         )
 
-    application.add_error_handler(error_handler)
+    application.add_error_handler(
+        error_handler
+    )
 
-    logger.info("Store Bot is starting...")
+    logger.info(
+        "Store Bot starting..."
+    )
 
     application.run_polling()
 
